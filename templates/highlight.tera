@@ -1,0 +1,5 @@
+{{text}} —{% if color %} <mark class="hltr-{{color_code}}">{{color}}</mark> |{% endif %} location: [{{location}}]({{app_link}})
+{% if note %}
+{{note}}
+{% endif %}
+---
