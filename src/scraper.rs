@@ -247,7 +247,7 @@ pub fn fetch_notebook_html(
     )?;
     let tab = browser.new_tab().context("Failed to open tab in Chrome")?;
 
-    // Set cookies before navigation
+    // Set cookies before navigation (preserve path/secure/httpOnly from stored session)
     let cookie_params: Vec<CookieParam> = cookies
         .iter()
         .map(|c| CookieParam {
@@ -255,9 +255,9 @@ pub fn fetch_notebook_html(
             value: c.value.clone(),
             domain: Some(c.domain.clone()),
             url: None,
-            path: None,
-            secure: None,
-            http_only: None,
+            path: Some(c.path.clone()),
+            secure: Some(c.secure),
+            http_only: Some(c.http_only),
             same_site: None,
             expires: None,
             priority: None,

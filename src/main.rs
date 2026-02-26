@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod email;
 mod log_config;
 mod models;
 mod renderer;
@@ -55,6 +56,10 @@ enum Commands {
         /// Read from a saved archive instead of fetching from Amazon
         #[arg(long)]
         use_archive: Option<PathBuf>,
+
+        /// Send an email report after sync
+        #[arg(long)]
+        email: bool,
     },
 
     /// List books in your Kindle library
@@ -102,15 +107,15 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
-    log_config::init(cli.verbose);
+    let log_handle = log_config::init(cli.verbose);
 
-    if let Err(e) = run(cli) {
+    if let Err(e) = run(cli, &log_handle) {
         eprintln!("\x1b[31mError: {e:?}\x1b[0m");
         std::process::exit(1);
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+fn run(cli: Cli, log_handle: &log4rs::Handle) -> Result<()> {
     if cli.verbose > 0 {
         let log_path = std::env::temp_dir().join("flint.log");
         debug!("Log file: {}", log_path.display());
@@ -136,10 +141,10 @@ fn run(cli: Cli) -> Result<()> {
             region.as_deref(),
             use_archive.as_deref(),
         ),
-        cmd @ Commands::Sync { .. } => cmd_sync(&config, &data_dir, cmd),
+        cmd @ Commands::Sync { .. } => cmd_sync(&config, &data_dir, cmd, cli.verbose, log_handle),
         Commands::Login { region } => cmd_login(&config, &data_dir, region.as_deref()),
         Commands::Logout => cmd_logout(&data_dir),
-        Commands::CheckConfig => cmd_check_config(&config),
+        Commands::CheckConfig => cmd_check_config(&config, &data_dir),
         Commands::Resync {
             file,
             region,
@@ -172,7 +177,7 @@ fn cmd_logout(data_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_check_config(config: &config::Config) -> Result<()> {
+fn cmd_check_config(config: &config::Config, data_dir: &std::path::Path) -> Result<()> {
     let green = "\x1b[32m";
     let red = "\x1b[31m";
     let reset = "\x1b[0m";
@@ -183,6 +188,8 @@ fn cmd_check_config(config: &config::Config) -> Result<()> {
     println!("Output directory:   {}", config.output_dir().display());
     println!("Frontmatter format: {}", config.frontmatter_format());
     println!("Download metadata:  {}", config.download_metadata());
+    println!("Log directory:      {}", config.log_dir(data_dir).display());
+    println!("Keep logs (days):   {}", config.keep_logs_days());
     let ignored = config.ignored_books();
     if !ignored.is_empty() {
         println!("Ignored books:      {}", ignored.join(", "));
@@ -257,6 +264,29 @@ fn cmd_check_config(config: &config::Config) -> Result<()> {
                 println!("{red}ERR{reset} Test render failed: {e}");
                 errors += 1;
             }
+        }
+    }
+
+    // Validate email config
+    if let Some(email) = &config.email {
+        let mut email_ok = true;
+        if email.to.is_empty() {
+            println!("{red}ERR{reset} Email 'to' address is empty.");
+            errors += 1;
+            email_ok = false;
+        }
+        if email.from.is_empty() {
+            println!("{red}ERR{reset} Email 'from' address is empty.");
+            errors += 1;
+            email_ok = false;
+        }
+        if email.resend_api_key.is_empty() {
+            println!("{red}ERR{reset} Email 'resend_api_key' is empty.");
+            errors += 1;
+            email_ok = false;
+        }
+        if email_ok {
+            println!("{green}OK{reset}  Email config valid (to: {}).", email.to);
         }
     }
 
@@ -337,7 +367,13 @@ fn cmd_list(
     Ok(())
 }
 
-fn cmd_sync(config: &config::Config, data_dir: &std::path::Path, cmd: Commands) -> Result<()> {
+fn cmd_sync(
+    config: &config::Config,
+    data_dir: &std::path::Path,
+    cmd: Commands,
+    verbose: u8,
+    log_handle: &log4rs::Handle,
+) -> Result<()> {
     let Commands::Sync {
         output_dir: output_dir_override,
         region,
@@ -345,9 +381,34 @@ fn cmd_sync(config: &config::Config, data_dir: &std::path::Path, cmd: Commands) 
         book,
         save_archive,
         use_archive,
+        email: send_email,
     } = cmd
     else {
         unreachable!()
+    };
+
+    // Validate --email flag early
+    let email_config = if send_email {
+        let ec = config
+            .email
+            .as_ref()
+            .context("--email flag requires [email] section in config.toml")?;
+        Some(ec)
+    } else {
+        None
+    };
+
+    // Set up per-run log file
+    let log_dir = config.log_dir(data_dir);
+    let log_file = match log_config::init_run_log(log_handle, verbose, &log_dir) {
+        Ok(path) => {
+            debug!("Run log: {}", path.display());
+            Some(path)
+        }
+        Err(e) => {
+            warn!("Could not create run log: {e}");
+            None
+        }
     };
 
     let region_name = region.as_deref().unwrap_or(config.region_name());
@@ -364,15 +425,117 @@ fn cmd_sync(config: &config::Config, data_dir: &std::path::Path, cmd: Commands) 
     let use_arc = use_archive.as_deref().map(Archive::new);
     let save_arc = save_archive.as_deref().map(Archive::new);
 
+    let sync_mode = email::SyncMode {
+        source: if use_arc.is_some() {
+            email::SyncSource::Archive
+        } else {
+            email::SyncSource::Amazon
+        },
+        save_archive: save_arc.is_some(),
+        sync_all,
+        single_book: book.is_some(),
+    };
+
+    let sync_start_time = chrono::Local::now();
+    let sync_start = std::time::Instant::now();
+
+    // Run the sync, capturing results or error for the email report
+    let sync_result = run_sync(
+        config,
+        data_dir,
+        region,
+        &output_dir,
+        download_metadata,
+        frontmatter_format,
+        file_template,
+        highlight_template,
+        filename_template,
+        use_arc.as_ref(),
+        save_arc.as_ref(),
+        sync_all,
+        book.as_deref(),
+    );
+
+    let total_elapsed = sync_start.elapsed();
+
+    // Build report and send email if requested
+    if let Some(ec) = email_config {
+        let report = match &sync_result {
+            Ok((synced_count, skipped_count, total_highlights, book_results)) => {
+                email::SyncReport {
+                    synced_count: *synced_count,
+                    skipped_count: *skipped_count,
+                    total_highlights: *total_highlights,
+                    duration: total_elapsed,
+                    start_time: sync_start_time,
+                    books: book_results.clone(),
+                    error: None,
+                    log_file: log_file.clone(),
+                    mode: sync_mode,
+                    session_expired: false,
+                }
+            }
+            Err(e) => {
+                let err_msg = format!("{e:#}");
+                let session_expired =
+                    err_msg.contains("session has expired") || err_msg.contains("No saved session");
+                email::SyncReport {
+                    synced_count: 0,
+                    skipped_count: 0,
+                    total_highlights: 0,
+                    duration: total_elapsed,
+                    start_time: sync_start_time,
+                    books: vec![],
+                    error: Some(err_msg),
+                    log_file: log_file.clone(),
+                    mode: sync_mode,
+                    session_expired,
+                }
+            }
+        };
+
+        if let Err(e) = email::send_sync_email(ec, &report) {
+            warn!("Failed to send email report: {e}");
+        }
+    }
+
+    // Clean up old log files
+    log_config::cleanup_old_logs(&log_dir, config.keep_logs_days());
+
+    // Return the original sync result (discard the extra data)
+    sync_result.map(|_| ())
+}
+
+/// Inner sync logic, returns stats for the email report.
+#[allow(clippy::too_many_arguments)]
+fn run_sync(
+    config: &config::Config,
+    data_dir: &std::path::Path,
+    region: &config::AmazonRegion,
+    output_dir: &std::path::Path,
+    download_metadata: bool,
+    frontmatter_format: &str,
+    file_template: Option<&str>,
+    highlight_template: Option<&str>,
+    filename_template: Option<&str>,
+    use_arc: Option<&Archive>,
+    save_arc: Option<&Archive>,
+    sync_all: bool,
+    specific_asin: Option<&str>,
+) -> Result<(usize, usize, usize, Vec<email::BookSyncResult>)> {
+    // Validate session early to avoid Chrome login fallback in unattended syncs
+    if use_arc.is_none() {
+        auth::check_session(region, data_dir)?;
+    }
+
     // Fetch book list (uses headless Chrome for JS-rendered content)
-    let html = scraper::fetch_notebook_html(region, use_arc.as_ref(), save_arc.as_ref(), data_dir)?;
+    let html = scraper::fetch_notebook_html(region, use_arc, save_arc, data_dir)?;
     let all_books = scraper::scrape_books(&html, region)?;
 
     // Determine which books to sync
-    let existing = sync::scan_existing_files(&output_dir)?;
+    let existing = sync::scan_existing_files(output_dir)?;
     let state = config::SyncState::load(data_dir);
 
-    let specific_asin = book.as_deref();
     let books_to_process = if let Some(asin) = specific_asin {
         all_books
             .into_iter()
@@ -408,7 +571,7 @@ fn cmd_sync(config: &config::Config, data_dir: &std::path::Path, cmd: Commands) 
 
     if books_to_process.is_empty() {
         info!("All books are up to date.");
-        return Ok(());
+        return Ok((0, 0, 0, vec![]));
     }
 
     // Build HTTP client for highlight/metadata fetches
@@ -419,17 +582,17 @@ fn cmd_sync(config: &config::Config, data_dir: &std::path::Path, cmd: Commands) 
     };
 
     let total = books_to_process.len();
-    let sync_start_time = chrono::Local::now();
     info!(
         "Syncing {} book(s) at {}...",
         total,
-        sync_start_time.format("%H:%M:%S")
+        chrono::Local::now().format("%H:%M:%S")
     );
     let sync_start = std::time::Instant::now();
 
     let mut synced_count: usize = 0;
     let mut skipped_count: usize = 0;
     let mut total_highlights: usize = 0;
+    let mut book_results: Vec<email::BookSyncResult> = Vec::new();
 
     for (i, book) in books_to_process.iter().enumerate() {
         let book_start = std::time::Instant::now();
@@ -441,23 +604,24 @@ fn cmd_sync(config: &config::Config, data_dir: &std::path::Path, cmd: Commands) 
             book.author
         );
 
-        let highlights = scraper::scrape_book_highlights(
-            &client,
-            region,
-            book,
-            use_arc.as_ref(),
-            save_arc.as_ref(),
-        )
-        .with_context(|| format!("Failed to scrape highlights for {}", book.title))?;
+        let highlights = scraper::scrape_book_highlights(&client, region, book, use_arc, save_arc)
+            .with_context(|| format!("Failed to scrape highlights for {}", book.title))?;
 
         if highlights.is_empty() {
             info!("    no highlights, skipping.");
             skipped_count += 1;
+            book_results.push(email::BookSyncResult {
+                title: scraper::shorten_title(&book.title),
+                author: book.author.clone(),
+                highlight_count: 0,
+                duration: book_start.elapsed(),
+                status: email::BookSyncStatus::Skipped,
+            });
             continue;
         }
 
         let metadata = if download_metadata {
-            scraper::scrape_book_metadata(&client, book, use_arc.as_ref(), save_arc.as_ref()).ok()
+            scraper::scrape_book_metadata(&client, book, use_arc, save_arc).ok()
         } else {
             None
         };
@@ -472,7 +636,7 @@ fn cmd_sync(config: &config::Config, data_dir: &std::path::Path, cmd: Commands) 
 
         let path = sync::sync_book(
             &entry,
-            &output_dir,
+            output_dir,
             existing_file,
             file_template,
             highlight_template,
@@ -490,6 +654,13 @@ fn cmd_sync(config: &config::Config, data_dir: &std::path::Path, cmd: Commands) 
         );
         synced_count += 1;
         total_highlights += hl_count;
+        book_results.push(email::BookSyncResult {
+            title: scraper::shorten_title(&book.title),
+            author: book.author.clone(),
+            highlight_count: hl_count,
+            duration: book_elapsed,
+            status: email::BookSyncStatus::Synced,
+        });
     }
 
     // Record successful sync (skip for archive-only runs)
@@ -502,16 +673,16 @@ fn cmd_sync(config: &config::Config, data_dir: &std::path::Path, cmd: Commands) 
     }
 
     let total_elapsed = sync_start.elapsed();
-    let sync_end_time = chrono::Local::now();
     info!(
         "Done at {}! Synced {} books ({} highlights) in {:.1}s. {} skipped (no highlights).",
-        sync_end_time.format("%H:%M:%S"),
+        chrono::Local::now().format("%H:%M:%S"),
         synced_count,
         total_highlights,
         total_elapsed.as_secs_f64(),
         skipped_count
     );
-    Ok(())
+
+    Ok((synced_count, skipped_count, total_highlights, book_results))
 }
 
 fn cmd_resync(

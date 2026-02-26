@@ -17,6 +17,16 @@ pub struct StoredCookie {
     pub name: String,
     pub value: String,
     pub domain: String,
+    #[serde(default = "default_path")]
+    pub path: String,
+    #[serde(default)]
+    pub secure: bool,
+    #[serde(default)]
+    pub http_only: bool,
+}
+
+fn default_path() -> String {
+    "/".to_string()
 }
 
 fn cookies_path(data_dir: &Path) -> std::path::PathBuf {
@@ -74,7 +84,16 @@ fn build_client_from_cookies(cookies: &[StoredCookie], region: &AmazonRegion) ->
         .parse()
         .context("Invalid notebook URL")?;
     for cookie in cookies {
-        let cookie_str = format!("{}={}; Domain={}", cookie.name, cookie.value, cookie.domain);
+        let mut cookie_str = format!(
+            "{}={}; Domain={}; Path={}",
+            cookie.name, cookie.value, cookie.domain, cookie.path
+        );
+        if cookie.secure {
+            cookie_str.push_str("; Secure");
+        }
+        if cookie.http_only {
+            cookie_str.push_str("; HttpOnly");
+        }
         jar.add_cookie_str(&cookie_str, &notebook_url);
     }
     Client::builder()
@@ -135,6 +154,18 @@ fn try_saved_cookies(region: &AmazonRegion, data_dir: &Path) -> Option<Client> {
             None
         }
     }
+}
+
+/// Check that a valid Amazon session exists without falling back to Chrome login.
+/// Use this before automated syncs to detect expired sessions early.
+pub fn check_session(region: &AmazonRegion, data_dir: &Path) -> Result<()> {
+    let cookies = match load_stored_cookies(data_dir) {
+        Ok(c) if !c.is_empty() => c,
+        Ok(_) | Err(_) => {
+            bail!("No saved session. Run 'flint login' first.");
+        }
+    };
+    validate_session(&cookies, region)
 }
 
 /// Get an authenticated client. Tries saved cookies first, falls back to
@@ -213,13 +244,16 @@ pub fn login_via_chrome(region: &AmazonRegion, data_dir: &Path) -> Result<Client
         .context("Failed to extract cookies from Chrome")?;
     debug!("Extracted {} cookies from Chrome", chrome_cookies.len());
 
-    // Store cookies for reuse
+    // Store cookies for reuse (preserve path/secure/httpOnly for accurate replay)
     let stored: Vec<StoredCookie> = chrome_cookies
         .iter()
         .map(|c| StoredCookie {
             name: c.name.clone(),
             value: c.value.clone(),
             domain: c.domain.clone(),
+            path: c.path.clone(),
+            secure: c.secure,
+            http_only: c.http_only,
         })
         .collect();
 

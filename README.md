@@ -46,6 +46,7 @@ flint sync --all                # sync every book
 flint sync --book B01N5AX61W    # sync one book by ASIN
 flint sync --output-dir ./out   # custom output directory
 flint sync --region uk          # use Amazon UK
+flint sync --email              # send email report after sync
 ```
 
 **Regions:** `global` (default), `india`, `japan`, `spain`, `germany`, `italy`, `uk`, `france`, `netherlands`, `canada`
@@ -79,6 +80,19 @@ Reads the ASIN from the file's frontmatter, re-scrapes highlights from Amazon, a
 
 Re-running `sync` on existing files is safe. New highlights are inserted in the correct position. Existing highlights (and any edits you've made to them) are preserved. The `^ref-{id}` block references on each highlight line enable this diffing. Books are matched by `bookId` with fallback to ASIN for resilience against Amazon title changes.
 
+### Email notifications
+
+Opt-in email reports via [Resend](https://resend.com). Add an `[email]` section to `config.toml`:
+
+```toml
+[email]
+to = "you@example.com"
+from = "flint@yourdomain.com"
+resend_api_key = "re_xxx..."
+```
+
+Then pass `--email` to any sync command. The email includes sync stats, per-book details, and the log file path. Email failures are logged as warnings and never affect the sync exit code.
+
 ### Logging
 
 ```
@@ -86,7 +100,14 @@ flint -v sync         # debug output to console + log file
 flint -vv sync        # trace output to console + log file
 ```
 
-Verbose mode writes a rolling log file to your system temp directory (`$TMPDIR/flint.log`, 3MB, 3 rotations). The log path is printed at startup. Without `-v`, output goes to the console only and nothing is written to disk.
+Verbose mode writes a rolling log file to your system temp directory (`$TMPDIR/flint.log`, 3MB, 3 rotations). The log path is printed at startup.
+
+Each `sync` command also creates a per-run log file in the log directory (default: `{data_dir}/logs/`). Old logs are cleaned up automatically after 30 days. Both are configurable:
+
+```toml
+log_dir = "~/flint-logs"
+keep_logs_days = 30
+```
 
 ## Data directory
 
@@ -107,12 +128,19 @@ region = "global"
 download_metadata = true
 frontmatter_format = "flat"  # or "nested" for legacy kindle-sync: format
 ignored_books = ["Sample Book", "Free Preview"]
+# log_dir = "~/flint-logs"    # default: {data_dir}/logs/
+# keep_logs_days = 30
 
 [templates]
 # Override default templates (Tera syntax)
 # file_template = "..."
 # highlight_template = "..."
 filename_template = "{{authors_last_names}}-{{title}}"
+
+[email]
+to = "you@example.com"
+from = "flint@yourdomain.com"
+resend_api_key = "re_xxx..."
 ```
 
 ### Filename template variables

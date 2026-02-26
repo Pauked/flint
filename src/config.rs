@@ -81,6 +81,13 @@ pub fn get_region(name: &str) -> Result<&'static AmazonRegion> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailConfig {
+    pub to: String,
+    pub from: String,
+    pub resend_api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplatesConfig {
     pub file_template: Option<String>,
     pub highlight_template: Option<String>,
@@ -95,6 +102,9 @@ pub struct Config {
     pub frontmatter_format: Option<String>,
     pub templates: Option<TemplatesConfig>,
     pub ignored_books: Option<Vec<String>>,
+    pub email: Option<EmailConfig>,
+    pub log_dir: Option<String>,
+    pub keep_logs_days: Option<u32>,
 }
 
 /// Resolve the data directory for config, cookies, and state files.
@@ -159,6 +169,20 @@ impl Config {
 
     pub fn ignored_books(&self) -> &[String] {
         self.ignored_books.as_deref().unwrap_or(&[])
+    }
+
+    pub fn log_dir(&self, data_dir: &Path) -> PathBuf {
+        match &self.log_dir {
+            Some(dir) => {
+                let expanded = shellexpand::tilde(dir);
+                PathBuf::from(expanded.as_ref())
+            }
+            None => data_dir.join("logs"),
+        }
+    }
+
+    pub fn keep_logs_days(&self) -> u32 {
+        self.keep_logs_days.unwrap_or(30)
     }
 }
 
