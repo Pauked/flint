@@ -15,7 +15,7 @@ pub struct Book {
 #[derive(Debug, Clone)]
 pub struct Highlight {
     pub id: String,
-    pub text: String,
+    pub text: Option<String>,
     pub location: Option<String>,
     pub page: Option<String>,
     pub note: Option<String>,
@@ -38,24 +38,59 @@ pub struct BookMetadata {
     pub author_url: Option<String>,
 }
 
+/// Flat Obsidian properties for kindle metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KindleFrontmatter {
+    #[serde(rename = "kindle-bookId")]
+    pub book_id: String,
+    #[serde(rename = "kindle-title")]
+    pub title: String,
+    #[serde(rename = "kindle-author")]
+    pub author: String,
+    #[serde(rename = "kindle-asin", default)]
+    pub asin: Option<String>,
+    #[serde(rename = "kindle-lastAnnotatedDate", default)]
+    pub last_annotated_date: Option<String>,
+    #[serde(rename = "kindle-bookImageUrl", default)]
+    pub book_image_url: Option<String>,
+    #[serde(rename = "kindle-highlightsCount")]
+    pub highlights_count: usize,
+}
+
+/// Legacy nested format from the Obsidian Kindle plugin (`kindle-sync:` wrapper).
+#[derive(Debug, Clone, Deserialize)]
+pub struct LegacyKindleFrontmatter {
+    #[serde(rename = "kindle-sync")]
+    pub kindle_sync: LegacyKindleSync,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LegacyKindleSync {
     #[serde(rename = "bookId")]
     pub book_id: String,
     pub title: String,
     pub author: String,
+    #[serde(default)]
     pub asin: Option<String>,
-    #[serde(rename = "lastAnnotatedDate")]
+    #[serde(rename = "lastAnnotatedDate", default)]
     pub last_annotated_date: Option<String>,
-    #[serde(rename = "bookImageUrl")]
+    #[serde(rename = "bookImageUrl", default)]
     pub book_image_url: Option<String>,
-    #[serde(rename = "highlightsCount")]
+    #[serde(rename = "highlightsCount", default)]
     pub highlights_count: usize,
 }
 
-/// Wrapper for the YAML frontmatter structure: `kindle-sync: { ... }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FrontmatterWrapper {
-    #[serde(rename = "kindle-sync")]
-    pub kindle_sync: KindleFrontmatter,
+impl From<LegacyKindleFrontmatter> for KindleFrontmatter {
+    fn from(legacy: LegacyKindleFrontmatter) -> Self {
+        let s = legacy.kindle_sync;
+        Self {
+            book_id: s.book_id,
+            title: s.title,
+            author: s.author,
+            asin: s.asin,
+            last_annotated_date: s.last_annotated_date,
+            book_image_url: s.book_image_url,
+            highlights_count: s.highlights_count,
+        }
+    }
 }

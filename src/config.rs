@@ -53,6 +53,16 @@ pub const REGIONS: &[AmazonRegion] = &[
         hostname: "amazon.fr",
         notebook_url: "https://lire.amazon.fr/notebook",
     },
+    AmazonRegion {
+        name: "netherlands",
+        hostname: "amazon.nl",
+        notebook_url: "https://lezen.amazon.nl/notebook",
+    },
+    AmazonRegion {
+        name: "canada",
+        hostname: "amazon.ca",
+        notebook_url: "https://read.amazon.ca/notebook",
+    },
 ];
 
 pub fn get_region(name: &str) -> Result<&'static AmazonRegion> {
@@ -82,7 +92,9 @@ pub struct Config {
     pub output_dir: Option<String>,
     pub region: Option<String>,
     pub download_metadata: Option<bool>,
+    pub frontmatter_format: Option<String>,
     pub templates: Option<TemplatesConfig>,
+    pub ignored_books: Option<Vec<String>>,
 }
 
 /// Resolve the data directory for config, cookies, and state files.
@@ -92,9 +104,7 @@ pub struct Config {
 /// 2. Fallback: `~/.config/flint/`
 pub fn resolve_data_dir() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("Failed to determine executable path")?;
-    let exe_dir = exe
-        .parent()
-        .context("Executable has no parent directory")?;
+    let exe_dir = exe.parent().context("Executable has no parent directory")?;
 
     if exe_dir.join("config.toml").exists() {
         debug!("Using binary-relative data dir: {}", exe_dir.display());
@@ -142,8 +152,15 @@ impl Config {
     pub fn download_metadata(&self) -> bool {
         self.download_metadata.unwrap_or(true)
     }
-}
 
+    pub fn frontmatter_format(&self) -> &str {
+        self.frontmatter_format.as_deref().unwrap_or("flat")
+    }
+
+    pub fn ignored_books(&self) -> &[String] {
+        self.ignored_books.as_deref().unwrap_or(&[])
+    }
+}
 
 // ── Sync state persistence ──────────────────────────────────────────────
 
@@ -167,8 +184,7 @@ impl SyncState {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).ok();
         }
-        let json = serde_json::to_string_pretty(self)
-            .context("Failed to serialize sync state")?;
+        let json = serde_json::to_string_pretty(self).context("Failed to serialize sync state")?;
         fs::write(&path, json)
             .with_context(|| format!("Failed to write state file: {}", path.display()))?;
         Ok(())
@@ -182,5 +198,50 @@ impl SyncState {
 
     pub fn record_sync(&mut self) {
         self.last_sync_date = Some(chrono::Utc::now().format("%Y-%m-%d").to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_region_canada() {
+        let region = get_region("canada").unwrap();
+        assert_eq!(region.hostname, "amazon.ca");
+        assert_eq!(region.notebook_url, "https://read.amazon.ca/notebook");
+    }
+
+    #[test]
+    fn test_get_region_case_insensitive() {
+        assert!(get_region("Canada").is_ok());
+        assert!(get_region("GLOBAL").is_ok());
+    }
+
+    #[test]
+    fn test_get_region_netherlands() {
+        let region = get_region("netherlands").unwrap();
+        assert_eq!(region.hostname, "amazon.nl");
+        assert_eq!(region.notebook_url, "https://lezen.amazon.nl/notebook");
+    }
+
+    #[test]
+    fn test_get_region_unknown() {
+        assert!(get_region("narnia").is_err());
+    }
+
+    #[test]
+    fn test_ignored_books_default_empty() {
+        let config = Config::default();
+        assert!(config.ignored_books().is_empty());
+    }
+
+    #[test]
+    fn test_ignored_books_returns_list() {
+        let config = Config {
+            ignored_books: Some(vec!["Sample".to_string(), "Preview".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(config.ignored_books(), &["Sample", "Preview"]);
     }
 }

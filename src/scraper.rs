@@ -24,7 +24,9 @@ pub struct Archive {
 
 impl Archive {
     pub fn new(dir: &Path) -> Self {
-        Self { dir: dir.to_path_buf() }
+        Self {
+            dir: dir.to_path_buf(),
+        }
     }
 
     fn notebook_path(&self) -> PathBuf {
@@ -36,7 +38,8 @@ impl Archive {
     }
 
     fn highlights_path(&self, asin: &str, page: usize) -> PathBuf {
-        self.highlights_dir().join(format!("{asin}_page{page}.html"))
+        self.highlights_dir()
+            .join(format!("{asin}_page{page}.html"))
     }
 
     fn metadata_path(&self, asin: &str) -> PathBuf {
@@ -77,7 +80,9 @@ fn parse_author(raw: &str) -> String {
 /// Strip Unicode control characters (LRM, RLM, etc.) and excess whitespace from Amazon metadata.
 fn clean_metadata_value(s: &str) -> String {
     s.chars()
-        .filter(|c| !c.is_control() && !matches!(c, '\u{200E}' | '\u{200F}' | '\u{200B}' | '\u{FEFF}'))
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '\u{200E}' | '\u{200F}' | '\u{200B}' | '\u{FEFF}')
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -188,7 +193,9 @@ pub fn scrape_books(html: &str, region: &AmazonRegion) -> Result<Vec<Book>> {
             .and_then(|s| parse_date(&s, region));
 
         let id = hash_id(&title);
-        let url = asin.as_ref().map(|a| format!("https://www.amazon.com/dp/{a}"));
+        let url = asin
+            .as_ref()
+            .map(|a| format!("https://www.amazon.com/dp/{a}"));
 
         books.push(Book {
             id,
@@ -223,7 +230,9 @@ pub fn fetch_notebook_html(
     }
 
     let cookies = auth::load_stored_cookies(data_dir)
-        .context("No saved session. Run 'login' first")?;
+        .context("No saved session. Run 'flint login' first.")?;
+
+    auth::validate_session(&cookies, region)?;
 
     info!("Loading notebook page...");
 
@@ -232,8 +241,11 @@ pub fn fetch_notebook_html(
         idle_browser_timeout: Duration::from_secs(120),
         ..LaunchOptions::default()
     };
-    let browser = Browser::new(launch_options).context("Failed to launch Chrome")?;
-    let tab = browser.new_tab().context("Failed to open tab")?;
+    let browser = Browser::new(launch_options).context(
+        "Failed to launch Chrome. Is Chrome or Chromium installed?\n  \
+         Install from: https://www.google.com/chrome/",
+    )?;
+    let tab = browser.new_tab().context("Failed to open tab in Chrome")?;
 
     // Set cookies before navigation
     let cookie_params: Vec<CookieParam> = cookies
@@ -375,7 +387,9 @@ pub fn scrape_book_highlights(
             .context("Failed to read highlights response")?;
 
         if let Some(archive) = save_archive {
-            archive.write(&archive.highlights_path(asin, page_num), &html).ok();
+            archive
+                .write(&archive.highlights_path(asin, page_num), &html)
+                .ok();
         }
 
         let document = Html::parse_document(&html);
@@ -427,24 +441,16 @@ fn parse_highlights(document: &Html) -> Result<Vec<Highlight>> {
     let mut highlights = Vec::new();
 
     for row in document.select(&row_sel) {
-        let text = match row
+        let text = row
             .select(&text_sel)
             .next()
             .map(|el| el.text().collect::<String>().trim().to_string())
-        {
-            Some(t) if !t.is_empty() => t,
-            _ => continue,
-        };
+            .filter(|s| !s.is_empty());
 
-        let color = row
-            .select(&color_sel)
-            .next()
-            .and_then(|el| {
-                let classes = el.value().attr("class").unwrap_or("");
-                color_re
-                    .captures(classes)
-                    .map(|c| c[1].to_string())
-            });
+        let color = row.select(&color_sel).next().and_then(|el| {
+            let classes = el.value().attr("class").unwrap_or("");
+            color_re.captures(classes).map(|c| c[1].to_string())
+        });
 
         let location = row
             .select(&location_sel)
@@ -467,7 +473,13 @@ fn parse_highlights(document: &Html) -> Result<Vec<Highlight>> {
             })
             .filter(|s| !s.is_empty());
 
-        let id = hash_id(&text);
+        // Skip rows with neither text nor note
+        if text.is_none() && note.is_none() {
+            continue;
+        }
+
+        // Use text for ID when available, fall back to note
+        let id = hash_id(text.as_deref().or(note.as_deref()).unwrap());
 
         highlights.push(Highlight {
             id,
@@ -561,9 +573,8 @@ pub fn scrape_book_metadata(
 
     // Try to get ISBN from popover data
     if metadata.isbn.is_none()
-        && let Ok(sel) = Selector::parse(
-            "#printEditionIsbn_feature_div .a-row:first-child span:nth-child(2)",
-        )
+        && let Ok(sel) =
+            Selector::parse("#printEditionIsbn_feature_div .a-row:first-child span:nth-child(2)")
         && let Some(el) = document.select(&sel).next()
     {
         let isbn_text = el.text().collect::<String>().trim().to_string();
@@ -588,7 +599,29 @@ pub fn scrape_book_metadata(
 // ── Author parsing utilities ────────────────────────────────────────────
 
 struct ParsedAuthor {
+    first_name: String,
     last_name: String,
+}
+
+/// Structured author name components for use in templates and filenames.
+pub struct AuthorNames {
+    pub first_author_first_name: String,
+    pub first_author_last_name: String,
+    pub second_author_first_name: String,
+    pub second_author_last_name: String,
+}
+
+/// Detect whether an author string uses "LastName, FirstName" format.
+/// Checks if the last chunk after splitting on "and" contains a comma.
+fn is_last_name_first_format(author: &str) -> bool {
+    let and_re = Regex::new(r"(?i)\band\b").unwrap();
+    let last_chunk = and_re
+        .split(author)
+        .map(|s| s.trim().trim_end_matches(',').trim())
+        .filter(|s| !s.is_empty())
+        .last()
+        .unwrap_or("");
+    last_chunk.contains(',')
 }
 
 /// Parse an author string into structured names.
@@ -597,24 +630,58 @@ struct ParsedAuthor {
 fn parse_authors(author: &str) -> Vec<ParsedAuthor> {
     if author.is_empty() {
         return vec![ParsedAuthor {
+            first_name: String::new(),
             last_name: String::new(),
         }];
     }
 
-    let and_re = Regex::new(r"(?i)\b(and)\b").unwrap();
+    let and_re = Regex::new(r"(?i)\band\b").unwrap();
 
     if and_re.is_match(author) {
-        let split_re = Regex::new(r"(?i)\band\b|,").unwrap();
-        return split_re
-            .split(author)
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(parse_single_author)
-            .collect();
+        if is_last_name_first_format(author) {
+            // "LastName, FirstName and LastName2, FirstName2" format.
+            // Split on "and" first, then pair comma-separated segments.
+            return and_re
+                .split(author)
+                .map(|s| s.trim().trim_end_matches(',').trim())
+                .filter(|s| !s.is_empty())
+                .flat_map(|chunk| {
+                    let segments: Vec<&str> = chunk.split(',').map(|s| s.trim()).collect();
+                    let mut authors = Vec::new();
+                    let mut i = 0;
+                    while i < segments.len() {
+                        if i + 1 < segments.len() {
+                            // Pair as "LastName, FirstName"
+                            let paired = format!("{}, {}", segments[i], segments[i + 1]);
+                            authors.push(parse_single_author(&paired));
+                            i += 2;
+                        } else if !segments[i].is_empty() {
+                            authors.push(parse_single_author(segments[i]));
+                            i += 1;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    authors
+                })
+                .collect();
+        } else {
+            // "FirstName LastName and FirstName2 LastName2" format.
+            let split_re = Regex::new(r"(?i)\band\b|,").unwrap();
+            return split_re
+                .split(author)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(parse_single_author)
+                .collect();
+        }
     }
 
     if author.contains(';') {
-        return author.split(';').map(|s| parse_single_author(s.trim())).collect();
+        return author
+            .split(';')
+            .map(|s| parse_single_author(s.trim()))
+            .collect();
     }
 
     vec![parse_single_author(author)]
@@ -624,14 +691,31 @@ fn parse_single_author(author: &str) -> ParsedAuthor {
     let author = author.trim().trim_end_matches('.');
 
     if author.contains(',') {
+        // "Last, First Middle" → first_name = first word after comma
         let parts: Vec<&str> = author.splitn(2, ',').collect();
+        let first_name = parts
+            .get(1)
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap_or("")
+            .to_string();
         ParsedAuthor {
+            first_name,
             last_name: parts[0].trim().to_string(),
         }
     } else {
         let parts: Vec<&str> = author.split_whitespace().collect();
-        ParsedAuthor {
-            last_name: parts.last().unwrap_or(&"").to_string(),
+        if parts.len() == 1 {
+            // Single word → last_name only
+            ParsedAuthor {
+                first_name: String::new(),
+                last_name: parts[0].to_string(),
+            }
+        } else {
+            // "First Middle Last" → first_name = first word, last_name = last word
+            ParsedAuthor {
+                first_name: parts.first().unwrap_or(&"").to_string(),
+                last_name: parts.last().unwrap_or(&"").to_string(),
+            }
         }
     }
 }
@@ -657,6 +741,26 @@ pub fn authors_last_names(author: &str) -> String {
     result
 }
 
+/// Parse an author string into structured first/last name components for
+/// the first two authors. Returns empty strings for missing fields.
+pub fn parsed_author_names(author: &str) -> AuthorNames {
+    let authors = parse_authors(author);
+    AuthorNames {
+        first_author_first_name: authors
+            .first()
+            .map_or(String::new(), |a| a.first_name.clone()),
+        first_author_last_name: authors
+            .first()
+            .map_or(String::new(), |a| a.last_name.clone()),
+        second_author_first_name: authors
+            .get(1)
+            .map_or(String::new(), |a| a.first_name.clone()),
+        second_author_last_name: authors
+            .get(1)
+            .map_or(String::new(), |a| a.last_name.clone()),
+    }
+}
+
 /// Generate a kindle:// deep link.
 pub fn kindle_app_link(asin: &str, location: Option<&str>) -> String {
     match location {
@@ -672,8 +776,9 @@ pub fn sanitize_filename(name: &str) -> String {
     for c in name.chars() {
         match c {
             '#' => result.push_str("Sharp"),
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
-            | '^' | '[' | ']' => result.push('_'),
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '^' | '[' | ']' => {
+                result.push('_')
+            }
             _ => result.push(c),
         }
     }
@@ -681,19 +786,33 @@ pub fn sanitize_filename(name: &str) -> String {
 }
 
 /// Generate a filename for a book.
-pub fn book_filename(book: &Book, template: Option<&str>) -> String {
+pub fn book_filename(
+    book: &Book,
+    metadata: Option<&BookMetadata>,
+    template: Option<&str>,
+) -> String {
+    let last_names = authors_last_names(&book.author);
+    let title = shorten_title(&book.title);
+    let date = book
+        .last_annotated_date
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+    let names = parsed_author_names(&book.author);
+    let pub_date = metadata
+        .and_then(|m| m.publication_date.as_deref())
+        .unwrap_or("");
+
     let filename = match template {
-        Some(tmpl) => {
-            let last_names = authors_last_names(&book.author);
-            let title = shorten_title(&book.title);
-            tmpl.replace("{{authors_last_names}}", &last_names)
-                .replace("{{title}}", &title)
-        }
-        None => {
-            let last_names = authors_last_names(&book.author);
-            let title = shorten_title(&book.title);
-            format!("{last_names}-{title}")
-        }
+        Some(tmpl) => tmpl
+            .replace("{{authors_last_names}}", &last_names)
+            .replace("{{title}}", &title)
+            .replace("{{lastAnnotatedDate}}", &date)
+            .replace("{{firstAuthorFirstName}}", &names.first_author_first_name)
+            .replace("{{firstAuthorLastName}}", &names.first_author_last_name)
+            .replace("{{secondAuthorFirstName}}", &names.second_author_first_name)
+            .replace("{{secondAuthorLastName}}", &names.second_author_last_name)
+            .replace("{{publicationDate}}", pub_date),
+        None => format!("{last_names}-{title}"),
     };
 
     format!("{}.md", sanitize_filename(&filename))
@@ -737,10 +856,7 @@ mod tests {
     #[test]
     fn test_shorten_title() {
         assert_eq!(shorten_title("Title (Subtitle)"), "Title");
-        assert_eq!(
-            shorten_title("Title: A Long Subtitle"),
-            "Title"
-        );
+        assert_eq!(shorten_title("Title: A Long Subtitle"), "Title");
         assert_eq!(shorten_title("It's a Test"), "Its a Test");
         assert_eq!(shorten_title("Title [Series]"), "Title (Series)");
     }
@@ -767,6 +883,42 @@ mod tests {
     }
 
     #[test]
+    fn test_authors_last_names_last_first_format() {
+        // "LastName, FirstName and LastName2, FirstName2" — was broken before
+        assert_eq!(
+            authors_last_names("Kegan, Robert and Lahey, Lisa Laskow"),
+            "Kegan-Lahey"
+        );
+    }
+
+    #[test]
+    fn test_authors_last_names_last_first_oxford_comma() {
+        assert_eq!(
+            authors_last_names("Newport, Cal, and Holiday, Ryan"),
+            "Newport-Holiday"
+        );
+    }
+
+    #[test]
+    fn test_authors_last_names_last_first_three() {
+        assert_eq!(
+            authors_last_names("Smith, John, Jones, Jane, and Brown, Bob"),
+            "Smith_et_al"
+        );
+    }
+
+    #[test]
+    fn test_authors_last_names_contains_and_in_word() {
+        // "Husband" contains "and" but not as a word boundary
+        assert_eq!(authors_last_names("Husband"), "Husband");
+    }
+
+    #[test]
+    fn test_authors_last_names_mccall_smith() {
+        assert_eq!(authors_last_names("Alexander McCall Smith"), "Smith");
+    }
+
+    #[test]
     fn test_kindle_app_link() {
         assert_eq!(
             kindle_app_link("B01N5AX61W", Some("250")),
@@ -782,7 +934,10 @@ mod tests {
     fn test_sanitize_filename() {
         assert_eq!(sanitize_filename("foo/bar:baz"), "foo_bar_baz");
         assert_eq!(sanitize_filename("normal-name"), "normal-name");
-        assert_eq!(sanitize_filename("C# 12 in a Nutshell"), "CSharp 12 in a Nutshell");
+        assert_eq!(
+            sanitize_filename("C# 12 in a Nutshell"),
+            "CSharp 12 in a Nutshell"
+        );
         assert_eq!(sanitize_filename("test[1]^2|3"), "test_1__2_3");
     }
 
@@ -797,7 +952,7 @@ mod tests {
             image_url: None,
             last_annotated_date: None,
         };
-        assert_eq!(book_filename(&book, None), "Clear-Atomic Habits.md");
+        assert_eq!(book_filename(&book, None, None), "Clear-Atomic Habits.md");
     }
 
     #[test]
@@ -848,7 +1003,7 @@ mod tests {
         let document = Html::parse_document(html);
         let highlights = parse_highlights(&document).unwrap();
         assert_eq!(highlights.len(), 1);
-        assert_eq!(highlights[0].text, "This is a highlight.");
+        assert_eq!(highlights[0].text.as_deref(), Some("This is a highlight."));
         assert_eq!(highlights[0].location.as_deref(), Some("250"));
         assert_eq!(highlights[0].page.as_deref(), Some("42"));
         assert_eq!(highlights[0].color.as_deref(), Some("yellow"));
@@ -872,5 +1027,144 @@ mod tests {
         assert_eq!(highlights.len(), 1);
         assert_eq!(highlights[0].note.as_deref(), Some("My personal note"));
         assert_eq!(highlights[0].color.as_deref(), Some("blue"));
+    }
+
+    #[test]
+    fn test_parse_highlights_note_only() {
+        let html = r#"
+        <html><body>
+        <div class="a-row a-spacing-base">
+            <span id="highlight"></span>
+            <span class="kp-notebook-highlight kp-notebook-highlight-yellow"></span>
+            <input id="kp-annotation-location" value="500" />
+            <span id="annotationNoteHeader">Note - Location 500</span>
+            <span id="note">A note without highlighted text</span>
+        </div>
+        </body></html>
+        "#;
+        let document = Html::parse_document(html);
+        let highlights = parse_highlights(&document).unwrap();
+        assert_eq!(highlights.len(), 1);
+        assert!(highlights[0].text.is_none());
+        assert_eq!(
+            highlights[0].note.as_deref(),
+            Some("A note without highlighted text")
+        );
+    }
+
+    #[test]
+    fn test_parse_highlights_skip_empty() {
+        let html = r#"
+        <html><body>
+        <div class="a-row a-spacing-base">
+            <span id="highlight"></span>
+            <span class="kp-notebook-highlight"></span>
+            <input id="kp-annotation-location" value="100" />
+            <span id="annotationNoteHeader"></span>
+            <span id="note"></span>
+        </div>
+        </body></html>
+        "#;
+        let document = Html::parse_document(html);
+        let highlights = parse_highlights(&document).unwrap();
+        assert!(highlights.is_empty());
+    }
+
+    #[test]
+    fn test_parsed_author_names_single() {
+        let names = parsed_author_names("James Clear");
+        assert_eq!(names.first_author_first_name, "James");
+        assert_eq!(names.first_author_last_name, "Clear");
+        assert_eq!(names.second_author_first_name, "");
+        assert_eq!(names.second_author_last_name, "");
+    }
+
+    #[test]
+    fn test_parsed_author_names_two() {
+        let names = parsed_author_names("James Clear and Cal Newport");
+        assert_eq!(names.first_author_first_name, "James");
+        assert_eq!(names.first_author_last_name, "Clear");
+        assert_eq!(names.second_author_first_name, "Cal");
+        assert_eq!(names.second_author_last_name, "Newport");
+    }
+
+    #[test]
+    fn test_parsed_author_names_last_first() {
+        let names = parsed_author_names("Clear, James");
+        assert_eq!(names.first_author_first_name, "James");
+        assert_eq!(names.first_author_last_name, "Clear");
+    }
+
+    #[test]
+    fn test_parsed_author_names_middle_name() {
+        let names = parsed_author_names("Yuval Noah Harari");
+        assert_eq!(names.first_author_first_name, "Yuval");
+        assert_eq!(names.first_author_last_name, "Harari");
+    }
+
+    #[test]
+    fn test_parsed_author_names_single_word() {
+        let names = parsed_author_names("Husband");
+        assert_eq!(names.first_author_first_name, "");
+        assert_eq!(names.first_author_last_name, "Husband");
+    }
+
+    #[test]
+    fn test_book_filename_with_author_names() {
+        let book = Book {
+            id: "123".to_string(),
+            title: "Atomic Habits: The life-changing bestseller".to_string(),
+            author: "James Clear".to_string(),
+            asin: None,
+            url: None,
+            image_url: None,
+            last_annotated_date: None,
+        };
+        assert_eq!(
+            book_filename(&book, None, Some("{{firstAuthorLastName}}-{{title}}")),
+            "Clear-Atomic Habits.md"
+        );
+    }
+
+    #[test]
+    fn test_book_filename_with_publication_date() {
+        let book = Book {
+            id: "123".to_string(),
+            title: "Deep Work: Rules".to_string(),
+            author: "Cal Newport".to_string(),
+            asin: None,
+            url: None,
+            image_url: None,
+            last_annotated_date: None,
+        };
+        let metadata = BookMetadata {
+            publication_date: Some("January 1, 2016".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            book_filename(
+                &book,
+                Some(&metadata),
+                Some("{{publicationDate}} - {{title}}")
+            ),
+            "January 1, 2016 - Deep Work.md"
+        );
+    }
+
+    #[test]
+    fn test_book_filename_with_date_template() {
+        let book = Book {
+            id: "123".to_string(),
+            title: "Deep Work: Rules for Focused Success".to_string(),
+            author: "Cal Newport".to_string(),
+            asin: None,
+            url: None,
+            image_url: None,
+            last_annotated_date: Some(NaiveDate::from_ymd_opt(2024, 3, 15).unwrap()),
+        };
+        assert_eq!(
+            book_filename(&book, None, Some("{{lastAnnotatedDate}} - {{title}}")),
+            "2024-03-15 - Deep Work.md"
+        );
     }
 }

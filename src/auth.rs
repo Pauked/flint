@@ -67,20 +67,14 @@ pub fn clear_cookies(data_dir: &Path) -> Result<()> {
 }
 
 /// Build a reqwest client from stored cookies.
-fn build_client_from_cookies(
-    cookies: &[StoredCookie],
-    region: &AmazonRegion,
-) -> Result<Client> {
+fn build_client_from_cookies(cookies: &[StoredCookie], region: &AmazonRegion) -> Result<Client> {
     let jar = Arc::new(Jar::default());
     let notebook_url: reqwest::Url = region
         .notebook_url
         .parse()
         .context("Invalid notebook URL")?;
     for cookie in cookies {
-        let cookie_str = format!(
-            "{}={}; Domain={}",
-            cookie.name, cookie.value, cookie.domain
-        );
+        let cookie_str = format!("{}={}; Domain={}", cookie.name, cookie.value, cookie.domain);
         jar.add_cookie_str(&cookie_str, &notebook_url);
     }
     Client::builder()
@@ -89,6 +83,26 @@ fn build_client_from_cookies(
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build()
         .context("Failed to build HTTP client")
+}
+
+/// Validate that stored cookies represent a live Amazon session.
+/// Makes an HTTP request to the notebook URL and checks for sign-in redirects.
+pub fn validate_session(cookies: &[StoredCookie], region: &AmazonRegion) -> Result<()> {
+    let client = build_client_from_cookies(cookies, region)?;
+
+    debug!("Verifying saved session against {}", region.notebook_url);
+    let response = client
+        .get(region.notebook_url)
+        .send()
+        .context("Session verification request failed")?;
+
+    let final_url = response.url().to_string();
+    if final_url.contains("signin") || final_url.contains("/ap/") {
+        debug!("Session expired (redirected to {})", final_url);
+        bail!("Amazon session has expired. Run 'flint login' to re-authenticate.");
+    }
+
+    Ok(())
 }
 
 /// Try to build an authenticated client from saved cookies.
@@ -106,32 +120,21 @@ fn try_saved_cookies(region: &AmazonRegion, data_dir: &Path) -> Option<Client> {
         }
     };
 
-    let client = match build_client_from_cookies(&cookies, region) {
-        Ok(c) => c,
-        Err(e) => {
-            debug!("Could not build client from saved cookies: {e}");
-            return None;
-        }
-    };
-
-    // Verify the cookies still work — check we're not redirected to sign-in
-    debug!("Verifying saved session against {}", region.notebook_url);
-    let response = match client.get(region.notebook_url).send() {
-        Ok(r) => r,
-        Err(e) => {
-            debug!("Session verification request failed: {e}");
-            return None;
-        }
-    };
-
-    let final_url = response.url().to_string();
-    if final_url.contains("signin") || final_url.contains("/ap/") {
-        debug!("Session expired (redirected to {})", final_url);
+    if let Err(e) = validate_session(&cookies, region) {
+        debug!("Session validation failed: {e}");
         return None;
     }
 
-    info!("Using saved session.");
-    Some(client)
+    match build_client_from_cookies(&cookies, region) {
+        Ok(client) => {
+            info!("Using saved session.");
+            Some(client)
+        }
+        Err(e) => {
+            debug!("Could not build client from saved cookies: {e}");
+            None
+        }
+    }
 }
 
 /// Get an authenticated client. Tries saved cookies first, falls back to
@@ -156,8 +159,13 @@ pub fn login_via_chrome(region: &AmazonRegion, data_dir: &Path) -> Result<Client
         ..LaunchOptions::default()
     };
 
-    let browser = Browser::new(launch_options).context("Failed to launch Chrome")?;
-    let tab = browser.new_tab().context("Failed to open new tab")?;
+    let browser = Browser::new(launch_options).context(
+        "Failed to launch Chrome. Is Chrome or Chromium installed?\n  \
+         Install from: https://www.google.com/chrome/",
+    )?;
+    let tab = browser
+        .new_tab()
+        .context("Failed to open new tab in Chrome")?;
 
     debug!("Navigating to {}", region.notebook_url);
     tab.navigate_to(region.notebook_url)
@@ -170,7 +178,7 @@ pub fn login_via_chrome(region: &AmazonRegion, data_dir: &Path) -> Result<Client
 
     loop {
         if start.elapsed() > timeout {
-            bail!("Login timed out after 5 minutes");
+            bail!("Login timed out after 5 minutes. Run 'flint login' to try again.");
         }
 
         std::thread::sleep(poll_interval);

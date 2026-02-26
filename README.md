@@ -8,7 +8,7 @@ This Rust based CLI app is based on the [obsidian-kindle-plugin](https://github.
 
 ## Install
 
-Download the latest binary from [Releases](https://github.com/paulhealey/flint/releases), or build from source:
+Download the latest binary from [Releases](https://github.com/Pauked/flint/releases), or build from source:
 
 ```
 cargo install --path .
@@ -48,7 +48,7 @@ flint sync --output-dir ./out   # custom output directory
 flint sync --region uk          # use Amazon UK
 ```
 
-**Regions:** `global` (default), `india`, `japan`, `spain`, `germany`, `italy`, `uk`, `france`
+**Regions:** `global` (default), `india`, `japan`, `spain`, `germany`, `italy`, `uk`, `france`, `netherlands`, `canada`
 
 ### Archive mode
 
@@ -58,6 +58,14 @@ Save raw Amazon HTML locally for offline use or debugging:
 flint sync --save-archive ./archive --all
 flint sync --use-archive ./archive --output-dir ./test-output --all
 ```
+
+### Validate config
+
+```
+flint check-config
+```
+
+Validates region, parses templates, test-renders with dummy data, and checks the filename template. Prints OK/ERR status for each check.
 
 ### Resync a single file
 
@@ -71,12 +79,14 @@ Reads the ASIN from the file's frontmatter, re-scrapes highlights from Amazon, a
 
 Re-running `sync` on existing files is safe. New highlights are inserted in the correct position. Existing highlights (and any edits you've made to them) are preserved. The `^ref-{id}` block references on each highlight line enable this diffing. Books are matched by `bookId` with fallback to ASIN for resilience against Amazon title changes.
 
-### Verbose logging
+### Logging
 
 ```
-flint -v sync         # debug logging
-flint -vv sync        # trace logging
+flint -v sync         # debug output to console + log file
+flint -vv sync        # trace output to console + log file
 ```
+
+Verbose mode writes a rolling log file to your system temp directory (`$TMPDIR/flint.log`, 3MB, 3 rotations). The log path is printed at startup. Without `-v`, output goes to the console only and nothing is written to disk.
 
 ## Data directory
 
@@ -95,6 +105,8 @@ Optional. Create `config.toml` in the data directory:
 output_dir = "~/Obsidian/Zettelkasten/300 Book Highlights"
 region = "global"
 download_metadata = true
+frontmatter_format = "flat"  # or "nested" for legacy kindle-sync: format
+ignored_books = ["Sample Book", "Free Preview"]
 
 [templates]
 # Override default templates (Tera syntax)
@@ -103,20 +115,32 @@ download_metadata = true
 filename_template = "{{authors_last_names}}-{{title}}"
 ```
 
+### Filename template variables
+
+- `{{title}}` — shortened title (strips parentheticals and subtitles)
+- `{{authors_last_names}}` — "Clear", "Blandy-Orendorff", or "Smith_et_al"
+- `{{lastAnnotatedDate}}` — date in `YYYY-MM-DD` format
+- `{{firstAuthorFirstName}}`, `{{firstAuthorLastName}}` — first author's parsed names
+- `{{secondAuthorFirstName}}`, `{{secondAuthorLastName}}` — second author's parsed names
+- `{{publicationDate}}` — raw publication date string from Amazon metadata
+
+### Template filters
+
+- `{{ publication_date | dateformat(format="%B %Y") }}` — format date strings; parses `January 1, 2020`, `2024-03-15`, and `2024` formats. Falls back to the original string if parsing fails.
+
 ## Output format
 
-Files are written with `kindle-sync` YAML frontmatter and Obsidian-compatible block references. Highlight colors are rendered using [Highlightr](https://github.com/chetachiezikeuzor/Highlightr-Plugin) syntax. Filenames are sanitized to avoid characters that break Obsidian links (`# ^ [ ] |`).
+Files are written with Obsidian-compatible YAML frontmatter (`kindle-*` properties) and block references. Highlight colors are rendered using [Highlightr](https://github.com/chetachiezikeuzor/Highlightr-Plugin) syntax. Filenames are sanitized to avoid characters that break Obsidian links (`# ^ [ ] |`). Both the flat format and legacy nested `kindle-sync:` format are supported for reading existing files.
 
 ```markdown
 ---
-kindle-sync:
-  bookId: '49849'
-  title: 'Atomic Habits'
-  author: James Clear
-  asin: B01N5AX61W
-  lastAnnotatedDate: '2024-08-27'
-  bookImageUrl: 'https://...'
-  highlightsCount: 97
+kindle-bookId: '49849'
+kindle-title: 'Atomic Habits'
+kindle-author: James Clear
+kindle-asin: B01N5AX61W
+kindle-lastAnnotatedDate: '2024-08-27'
+kindle-bookImageUrl: 'https://...'
+kindle-highlightsCount: 97
 ---
 # Atomic Habits
 ## Metadata

@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use tera::Tera;
 
 use crate::models::{Book, BookHighlights, Highlight};
-use crate::scraper::kindle_app_link;
+use crate::scraper::{kindle_app_link, parsed_author_names};
 
 const DEFAULT_FILE_TEMPLATE: &str = include_str!("../templates/book.tera");
 const DEFAULT_HIGHLIGHT_TEMPLATE: &str = include_str!("../templates/highlight.tera");
@@ -14,13 +16,65 @@ fn escape_yaml(s: &str) -> String {
 }
 
 /// Render YAML frontmatter for a book.
-pub fn render_frontmatter(book: &Book, highlights_count: usize) -> String {
+///
+/// `format` controls the output layout:
+/// - `"flat"` (default): Obsidian properties (`kindle-bookId`, `kindle-title`, etc.)
+/// - `"nested"`: legacy `kindle-sync:` wrapper with indented keys
+pub fn render_frontmatter(book: &Book, highlights_count: usize, format: &str) -> String {
+    if format == "nested" {
+        return render_frontmatter_nested(book, highlights_count);
+    }
+
+    let mut fm = String::from("---\n");
+
+    fm.push_str(&format!("kindle-bookId: '{}'\n", book.id));
+    fm.push_str(&format!("kindle-title: '{}'\n", escape_yaml(&book.title)));
+
+    // Author: only quote if it contains special YAML characters
+    let author = &book.author;
+    if author.contains(':')
+        || author.contains(',')
+        || author.contains('#')
+        || author.contains('\'')
+        || author.contains('"')
+        || author.contains('[')
+        || author.contains(']')
+        || author.contains('{')
+        || author.contains('}')
+    {
+        fm.push_str(&format!("kindle-author: '{}'\n", escape_yaml(author)));
+    } else {
+        fm.push_str(&format!("kindle-author: {author}\n"));
+    }
+
+    if let Some(ref asin) = book.asin {
+        fm.push_str(&format!("kindle-asin: {asin}\n"));
+    }
+
+    if let Some(ref date) = book.last_annotated_date {
+        fm.push_str(&format!(
+            "kindle-lastAnnotatedDate: '{}'\n",
+            date.format("%Y-%m-%d")
+        ));
+    }
+
+    if let Some(ref img) = book.image_url {
+        fm.push_str(&format!("kindle-bookImageUrl: '{}'\n", escape_yaml(img)));
+    }
+
+    fm.push_str(&format!("kindle-highlightsCount: {highlights_count}\n"));
+    fm.push_str("---\n");
+
+    fm
+}
+
+/// Render frontmatter in the legacy nested `kindle-sync:` format.
+fn render_frontmatter_nested(book: &Book, highlights_count: usize) -> String {
     let mut fm = String::from("---\nkindle-sync:\n");
 
     fm.push_str(&format!("  bookId: '{}'\n", book.id));
     fm.push_str(&format!("  title: '{}'\n", escape_yaml(&book.title)));
 
-    // Author: only quote if it contains special YAML characters
     let author = &book.author;
     if author.contains(':')
         || author.contains(',')
@@ -42,7 +96,10 @@ pub fn render_frontmatter(book: &Book, highlights_count: usize) -> String {
     }
 
     if let Some(ref date) = book.last_annotated_date {
-        fm.push_str(&format!("  lastAnnotatedDate: '{}'\n", date.format("%Y-%m-%d")));
+        fm.push_str(&format!(
+            "  lastAnnotatedDate: '{}'\n",
+            date.format("%Y-%m-%d")
+        ));
     }
 
     if let Some(ref img) = book.image_url {
@@ -77,7 +134,7 @@ pub fn render_highlight(
 ) -> Result<String> {
     let mut ctx = tera::Context::new();
     ctx.insert("id", &highlight.id);
-    ctx.insert("text", &highlight.text);
+    ctx.insert("text", &highlight.text.as_deref().unwrap_or(""));
     ctx.insert("location", &highlight.location.as_deref().unwrap_or(""));
     ctx.insert("page", &highlight.page.as_deref().unwrap_or(""));
     ctx.insert("note", &highlight.note.as_deref().unwrap_or(""));
@@ -103,17 +160,17 @@ pub fn render_highlight(
     let mut ref_added = false;
 
     // Find a safe prefix of the highlight text to match against (respects char boundaries)
-    let match_prefix = {
+    let match_prefix = highlight.text.as_deref().map(|text| {
         let max_bytes = 40;
-        let mut end = highlight.text.len().min(max_bytes);
-        while end > 0 && !highlight.text.is_char_boundary(end) {
+        let mut end = text.len().min(max_bytes);
+        while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }
-        &highlight.text[..end]
-    };
+        &text[..end]
+    });
 
     for line in &lines {
-        if !ref_added && line.contains(match_prefix) {
+        if !ref_added && match_prefix.is_some_and(|p| line.contains(p)) {
             result.push_str(line);
             result.push_str(&ref_suffix);
             ref_added = true;
@@ -166,22 +223,22 @@ pub fn render_file(
     ctx.insert("long_title", &book.title);
     ctx.insert("author", &book.author);
     ctx.insert("asin", &book.asin.as_deref().unwrap_or(""));
-    ctx.insert(
-        "url",
-        &book.url.as_deref().unwrap_or(""),
-    );
+    ctx.insert("url", &book.url.as_deref().unwrap_or(""));
     ctx.insert("image_url", &book.image_url.as_deref().unwrap_or(""));
 
-    let app_link = book
-        .asin
-        .as_ref()
-        .map(|asin| kindle_app_link(asin, None));
+    let app_link = book.asin.as_ref().map(|asin| kindle_app_link(asin, None));
     ctx.insert("app_link", &app_link.as_deref().unwrap_or(""));
 
     // Metadata fields
     let metadata = entry.metadata.as_ref();
-    ctx.insert("isbn", &metadata.and_then(|m| m.isbn.as_deref()).unwrap_or(""));
-    ctx.insert("pages", &metadata.and_then(|m| m.pages.as_deref()).unwrap_or(""));
+    ctx.insert(
+        "isbn",
+        &metadata.and_then(|m| m.isbn.as_deref()).unwrap_or(""),
+    );
+    ctx.insert(
+        "pages",
+        &metadata.and_then(|m| m.pages.as_deref()).unwrap_or(""),
+    );
     ctx.insert(
         "publication_date",
         &metadata
@@ -195,6 +252,22 @@ pub fn render_file(
     ctx.insert(
         "author_url",
         &metadata.and_then(|m| m.author_url.as_deref()).unwrap_or(""),
+    );
+
+    // Author name variables
+    let author_names = parsed_author_names(&book.author);
+    ctx.insert(
+        "firstAuthorFirstName",
+        &author_names.first_author_first_name,
+    );
+    ctx.insert("firstAuthorLastName", &author_names.first_author_last_name);
+    ctx.insert(
+        "secondAuthorFirstName",
+        &author_names.second_author_first_name,
+    );
+    ctx.insert(
+        "secondAuthorLastName",
+        &author_names.second_author_last_name,
     );
 
     ctx.insert("highlights_count", &entry.highlights.len());
@@ -212,18 +285,45 @@ pub fn render_file(
     Ok(cleaned.into_owned())
 }
 
+/// Custom Tera filter for date formatting.
+/// Tries parsing common date formats and reformats with the given `format` argument.
+/// Falls back to the original string if parsing fails.
+fn dateformat(
+    value: &tera::Value,
+    args: &HashMap<String, tera::Value>,
+) -> tera::Result<tera::Value> {
+    let input = value
+        .as_str()
+        .ok_or_else(|| tera::Error::msg("dateformat: expected a string value"))?;
+
+    if input.is_empty() {
+        return Ok(tera::Value::String(String::new()));
+    }
+
+    let fmt = args
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("%Y-%m-%d");
+
+    // Try common date formats
+    let parsed = chrono::NaiveDate::parse_from_str(input, "%B %d, %Y")
+        .or_else(|_| chrono::NaiveDate::parse_from_str(input, "%Y-%m-%d"))
+        .or_else(|_| chrono::NaiveDate::parse_from_str(input, "%Y"));
+
+    match parsed {
+        Ok(date) => Ok(tera::Value::String(date.format(fmt).to_string())),
+        Err(_) => Ok(tera::Value::String(input.to_string())),
+    }
+}
+
 /// Build a Tera instance with default or custom templates loaded.
-pub fn build_tera(
-    file_template: Option<&str>,
-    highlight_template: Option<&str>,
-) -> Result<Tera> {
+pub fn build_tera(file_template: Option<&str>, highlight_template: Option<&str>) -> Result<Tera> {
     let mut tera = Tera::default();
 
-    tera.add_raw_template(
-        "book.tera",
-        file_template.unwrap_or(DEFAULT_FILE_TEMPLATE),
-    )
-    .context("Failed to parse file template")?;
+    tera.register_filter("dateformat", dateformat);
+
+    tera.add_raw_template("book.tera", file_template.unwrap_or(DEFAULT_FILE_TEMPLATE))
+        .context("Failed to parse file template")?;
 
     tera.add_raw_template(
         "highlight.tera",
@@ -239,9 +339,10 @@ pub fn render_book_file(
     entry: &BookHighlights,
     file_template: Option<&str>,
     highlight_template: Option<&str>,
+    frontmatter_format: &str,
 ) -> Result<String> {
     let tera = build_tera(file_template, highlight_template)?;
-    let frontmatter = render_frontmatter(&entry.book, entry.highlights.len());
+    let frontmatter = render_frontmatter(&entry.book, entry.highlights.len(), frontmatter_format);
     let content = render_file(&tera, "book.tera", "highlight.tera", entry)?;
 
     Ok(format!("{frontmatter}{content}"))
@@ -267,6 +368,54 @@ pub fn render_single_highlight(
 mod tests {
     use super::*;
     use crate::models::BookMetadata;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_dateformat_filter_full_date() {
+        let value = tera::Value::String("January 1, 2020".to_string());
+        let mut args = HashMap::new();
+        args.insert(
+            "format".to_string(),
+            tera::Value::String("%Y-%m-%d".to_string()),
+        );
+        let result = dateformat(&value, &args).unwrap();
+        assert_eq!(result.as_str().unwrap(), "2020-01-01");
+    }
+
+    #[test]
+    fn test_dateformat_filter_iso() {
+        let value = tera::Value::String("2024-03-15".to_string());
+        let mut args = HashMap::new();
+        args.insert(
+            "format".to_string(),
+            tera::Value::String("%B %Y".to_string()),
+        );
+        let result = dateformat(&value, &args).unwrap();
+        assert_eq!(result.as_str().unwrap(), "March 2024");
+    }
+
+    #[test]
+    fn test_dateformat_filter_passthrough() {
+        let value = tera::Value::String("not a date".to_string());
+        let args = HashMap::new();
+        let result = dateformat(&value, &args).unwrap();
+        assert_eq!(result.as_str().unwrap(), "not a date");
+    }
+
+    #[test]
+    fn test_dateformat_filter_in_template() {
+        let mut tera = Tera::default();
+        tera.register_filter("dateformat", dateformat);
+        tera.add_raw_template(
+            "test",
+            r#"{{ publication_date | dateformat(format="%B %Y") }}"#,
+        )
+        .unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("publication_date", "January 1, 2020");
+        let result = tera.render("test", &ctx).unwrap();
+        assert_eq!(result, "January 2020");
+    }
 
     fn sample_book() -> Book {
         Book {
@@ -283,7 +432,7 @@ mod tests {
     fn sample_highlight() -> Highlight {
         Highlight {
             id: "54321".to_string(),
-            text: "This is a test highlight.".to_string(),
+            text: Some("This is a test highlight.".to_string()),
             location: Some("100".to_string()),
             page: Some("42".to_string()),
             note: None,
@@ -292,16 +441,30 @@ mod tests {
     }
 
     #[test]
-    fn test_render_frontmatter() {
+    fn test_render_frontmatter_flat() {
         let book = sample_book();
-        let fm = render_frontmatter(&book, 10);
-        assert!(fm.contains("kindle-sync:"));
-        assert!(fm.contains("bookId: '12345'"));
-        assert!(fm.contains("title: 'Test Book: A Subtitle'"));
-        assert!(fm.contains("author: John Doe"));
-        assert!(fm.contains("asin: B01TEST"));
-        assert!(fm.contains("lastAnnotatedDate: '2024-01-15'"));
-        assert!(fm.contains("highlightsCount: 10"));
+        let fm = render_frontmatter(&book, 10, "flat");
+        assert!(!fm.contains("kindle-sync:"));
+        assert!(fm.contains("kindle-bookId: '12345'"));
+        assert!(fm.contains("kindle-title: 'Test Book: A Subtitle'"));
+        assert!(fm.contains("kindle-author: John Doe"));
+        assert!(fm.contains("kindle-asin: B01TEST"));
+        assert!(fm.contains("kindle-lastAnnotatedDate: '2024-01-15'"));
+        assert!(fm.contains("kindle-highlightsCount: 10"));
+    }
+
+    #[test]
+    fn test_render_frontmatter_nested() {
+        let book = sample_book();
+        let fm = render_frontmatter(&book, 10, "nested");
+        assert!(fm.contains("kindle-sync:\n"));
+        assert!(fm.contains("  bookId: '12345'"));
+        assert!(fm.contains("  title: 'Test Book: A Subtitle'"));
+        assert!(fm.contains("  author: John Doe"));
+        assert!(fm.contains("  asin: B01TEST"));
+        assert!(fm.contains("  lastAnnotatedDate: '2024-01-15'"));
+        assert!(fm.contains("  highlightsCount: 10"));
+        assert!(!fm.contains("kindle-bookId:"));
     }
 
     #[test]
@@ -338,8 +501,8 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let result = render_book_file(&entry, None, None).unwrap();
-        assert!(result.contains("---\nkindle-sync:"));
+        let result = render_book_file(&entry, None, None, "flat").unwrap();
+        assert!(result.contains("---\nkindle-bookId:"));
         assert!(result.contains("# Test Book"));
         assert!(result.contains("## Metadata"));
         assert!(result.contains("* ASIN: B01TEST"));
@@ -354,7 +517,7 @@ mod tests {
         let book = sample_book();
         let highlight = Highlight {
             id: "99999".to_string(),
-            text: "When you find yourself saying, \u{2018}I don\u{2019}t know,\u{2019} be sure to follow it up".to_string(),
+            text: Some("When you find yourself saying, \u{2018}I don\u{2019}t know,\u{2019} be sure to follow it up".to_string()),
             location: Some("200".to_string()),
             page: None,
             note: None,
@@ -363,6 +526,22 @@ mod tests {
         let rendered = render_single_highlight(&highlight, &book, None).unwrap();
         assert!(rendered.contains("^ref-99999"));
         assert!(rendered.contains("\u{2018}I don\u{2019}t know"));
+    }
+
+    #[test]
+    fn test_render_note_only_highlight() {
+        let book = sample_book();
+        let highlight = Highlight {
+            id: "note1".to_string(),
+            text: None,
+            location: Some("300".to_string()),
+            page: None,
+            note: Some("My standalone note".to_string()),
+            color: None,
+        };
+        let rendered = render_single_highlight(&highlight, &book, None).unwrap();
+        assert!(rendered.contains("My standalone note"));
+        assert!(rendered.contains("^ref-note1"));
     }
 
     #[test]
@@ -381,12 +560,14 @@ mod tests {
             author: "James Clear".to_string(),
             asin: Some("B01N5AX61W".to_string()),
             url: Some("https://www.amazon.com/dp/B01N5AX61W".to_string()),
-            image_url: Some("https://m.media-amazon.com/images/I/81IL8Dy4vmL._SY160.jpg".to_string()),
+            image_url: Some(
+                "https://m.media-amazon.com/images/I/81IL8Dy4vmL._SY160.jpg".to_string(),
+            ),
             last_annotated_date: Some(chrono::NaiveDate::from_ymd_opt(2024, 8, 27).unwrap()),
         };
         let highlight = Highlight {
             id: "54880".to_string(),
-            text: "improving by 1 percent isn't particularly notable".to_string(),
+            text: Some("improving by 1 percent isn't particularly notable".to_string()),
             location: Some("250".to_string()),
             page: None,
             note: None,
@@ -400,15 +581,15 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let result = render_book_file(&entry, None, None).unwrap();
+        let result = render_book_file(&entry, None, None, "flat").unwrap();
 
         // Verify frontmatter
         assert!(result.starts_with("---\n"));
-        assert!(result.contains("  bookId: '49849'"));
-        assert!(result.contains("  author: James Clear\n"));
-        assert!(result.contains("  asin: B01N5AX61W\n"));
-        assert!(result.contains("  lastAnnotatedDate: '2024-08-27'"));
-        assert!(result.contains("  highlightsCount: 1"));
+        assert!(result.contains("kindle-bookId: '49849'"));
+        assert!(result.contains("kindle-author: James Clear\n"));
+        assert!(result.contains("kindle-asin: B01N5AX61W\n"));
+        assert!(result.contains("kindle-lastAnnotatedDate: '2024-08-27'"));
+        assert!(result.contains("kindle-highlightsCount: 1"));
 
         // Verify metadata section
         assert!(result.contains("# Atomic Habits"));
