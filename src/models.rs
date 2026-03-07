@@ -55,6 +55,8 @@ pub struct KindleFrontmatter {
     pub book_image_url: Option<String>,
     #[serde(rename = "kindle-highlightsCount")]
     pub highlights_count: usize,
+    #[serde(rename = "flint-lastSyncDate", default)]
+    pub last_sync_date: Option<String>,
 }
 
 /// Legacy nested format from the Obsidian Kindle plugin (`kindle-sync:` wrapper).
@@ -78,6 +80,8 @@ pub struct LegacyKindleSync {
     pub book_image_url: Option<String>,
     #[serde(rename = "highlightsCount", default)]
     pub highlights_count: usize,
+    #[serde(rename = "lastSyncDate", default)]
+    pub last_sync_date: Option<String>,
 }
 
 impl From<LegacyKindleFrontmatter> for KindleFrontmatter {
@@ -91,6 +95,7 @@ impl From<LegacyKindleFrontmatter> for KindleFrontmatter {
             last_annotated_date: s.last_annotated_date,
             book_image_url: s.book_image_url,
             highlights_count: s.highlights_count,
+            last_sync_date: s.last_sync_date,
         }
     }
 }

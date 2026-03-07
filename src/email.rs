@@ -318,6 +318,8 @@ fn generate_html(report: &SyncReport) -> String {
             </div>
 
             {log_file_section}
+
+            <div style="text-align: right; font-size: 0.75em; color: #666; margin-top: 8px;">flint v{version}</div>
         </div>
     </div>
 </body>
@@ -333,6 +335,7 @@ fn generate_html(report: &SyncReport) -> String {
         duration = duration_str,
         details = details,
         log_file_section = log_file_section,
+        version = env!("CARGO_PKG_VERSION"),
     )
 }
 
@@ -351,6 +354,7 @@ fn generate_plain_text(report: &SyncReport) -> String {
         if let Some(log_file) = &report.log_file {
             text.push_str(&format!("\nLog: {}\n", log_file.display()));
         }
+        text.push_str(&format!("\nflint v{}\n", env!("CARGO_PKG_VERSION")));
         return text;
     }
 
@@ -359,6 +363,7 @@ fn generate_plain_text(report: &SyncReport) -> String {
         if let Some(log_file) = &report.log_file {
             text.push_str(&format!("\nLog: {}\n", log_file.display()));
         }
+        text.push_str(&format!("\nflint v{}\n", env!("CARGO_PKG_VERSION")));
         return text;
     }
 
@@ -390,6 +395,8 @@ fn generate_plain_text(report: &SyncReport) -> String {
     if let Some(log_file) = &report.log_file {
         text.push_str(&format!("\nLog: {}\n", log_file.display()));
     }
+
+    text.push_str(&format!("\nflint v{}\n", env!("CARGO_PKG_VERSION")));
 
     text
 }

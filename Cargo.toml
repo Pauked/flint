@@ -1,6 +1,6 @@
 [package]
 name = "flint"
-version = "0.2.2"
+version = "0.2.5"
 edition = "2024"
 description = "Sync Kindle highlights to Obsidian"
 authors = ["Paul Healey"]
@@ -11,8 +11,8 @@ anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 toml = "0.9"
-reqwest = { version = "0.12", features = ["cookies", "blocking", "json"] }
-scraper = "0.24"
+reqwest = { version = "0.13", features = ["cookies", "blocking", "json"] }
+scraper = "0.25"
 headless_chrome = "1.0"
 tera = "1.20"
 chrono = { version = "0.4", features = ["serde"] }

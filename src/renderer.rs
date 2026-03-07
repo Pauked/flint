@@ -63,6 +63,11 @@ pub fn render_frontmatter(book: &Book, highlights_count: usize, format: &str) ->
     }
 
     fm.push_str(&format!("kindle-highlightsCount: {highlights_count}\n"));
+
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M");
+    fm.push_str(&format!("flint-lastSyncDate: '{now}'\n"));
+    fm.push_str(&format!("flint-version: {}\n", env!("CARGO_PKG_VERSION")));
+
     fm.push_str("---\n");
 
     fm
@@ -107,6 +112,11 @@ fn render_frontmatter_nested(book: &Book, highlights_count: usize) -> String {
     }
 
     fm.push_str(&format!("  highlightsCount: {highlights_count}\n"));
+
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M");
+    fm.push_str(&format!("  lastSyncDate: '{now}'\n"));
+    fm.push_str(&format!("  version: {}\n", env!("CARGO_PKG_VERSION")));
+
     fm.push_str("---\n");
 
     fm
@@ -451,6 +461,7 @@ mod tests {
         assert!(fm.contains("kindle-asin: B01TEST"));
         assert!(fm.contains("kindle-lastAnnotatedDate: '2024-01-15'"));
         assert!(fm.contains("kindle-highlightsCount: 10"));
+        assert!(fm.contains("flint-lastSyncDate:"));
     }
 
     #[test]
@@ -464,6 +475,7 @@ mod tests {
         assert!(fm.contains("  asin: B01TEST"));
         assert!(fm.contains("  lastAnnotatedDate: '2024-01-15'"));
         assert!(fm.contains("  highlightsCount: 10"));
+        assert!(fm.contains("  lastSyncDate:"));
         assert!(!fm.contains("kindle-bookId:"));
     }
 

@@ -91,7 +91,7 @@ from = "flint@yourdomain.com"
 resend_api_key = "re_xxx..."
 ```
 
-Then pass `--email` to any sync command. The email includes sync stats, per-book details, and the log file path. Email failures are logged as warnings and never affect the sync exit code.
+Then pass `--email` to any sync command. The email includes sync stats, per-book details, the log file path, and the flint version. Email failures are logged as warnings and never affect the sync exit code.
 
 ### Logging
 
@@ -169,6 +169,8 @@ kindle-asin: B01N5AX61W
 kindle-lastAnnotatedDate: '2024-08-27'
 kindle-bookImageUrl: 'https://...'
 kindle-highlightsCount: 97
+flint-lastSyncDate: '2024-08-27T19:50'
+flint-version: 0.2.4
 ---
 # Atomic Habits
 ## Metadata
