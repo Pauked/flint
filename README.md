@@ -4,17 +4,23 @@ Sync your Kindle highlights to Obsidian.
 
 Flint scrapes your highlights from Amazon's Kindle notebook page and writes them as Markdown files with Obsidian-compatible frontmatter and block references.
 
-This Rust based CLI app is based on the [obsidian-kindle-plugin](https://github.com/hadynz/obsidian-kindle-plugin) by Hady Osman, but extends it by adding a local archive of highlights HTML from Amazon and some small improvements. Such as handling characters not legal in Obisidan file names.
+This Rust based CLI app is based on the [obsidian-kindle-plugin](https://github.com/hadynz/obsidian-kindle-plugin) by Hady Osman, but extends it with a few extras:
+
+- **Local HTML archive** of your Amazon highlights page, so you can resync offline or diff changes over time
+- **Email reports** via [Resend](https://resend.com) — useful for scheduled/automated syncs so you know what changed without checking the vault
+- **Daily sync scheduling** (launchd) with per-run log files and early session-expiry detection
+- **Customisable templates** (Tera) for book files, highlights, and filenames
+- **Obsidian-friendly filenames** — sanitises characters that break Obsidian links
 
 ## Install
 
-Download the latest binary from [Releases](https://github.com/Pauked/flint/releases), or build from source:
+Build from source. Requires a [Rust toolchain](https://rustup.rs) and Chrome/Chromium installed (Chrome is used for Amazon login and fetching the book list).
 
 ```
+git clone https://github.com/Pauked/flint.git
+cd flint
 cargo install --path .
 ```
-
-Requires Chrome/Chromium installed (used for Amazon login and fetching the book list).
 
 ## Usage
 
@@ -123,7 +129,7 @@ Run with `-v` to see which data directory is active.
 Optional. Create `config.toml` in the data directory:
 
 ```toml
-output_dir = "~/Obsidian/Zettelkasten/300 Book Highlights"
+output_dir = "~/Obsidian/Books"
 region = "global"
 download_metadata = true
 frontmatter_format = "flat"  # or "nested" for legacy kindle-sync: format
@@ -170,7 +176,7 @@ kindle-lastAnnotatedDate: '2024-08-27'
 kindle-bookImageUrl: 'https://...'
 kindle-highlightsCount: 97
 flint-lastSyncDate: '2024-08-27T19:50'
-flint-version: 0.2.4
+flint-version: 0.2.5
 ---
 # Atomic Habits
 ## Metadata

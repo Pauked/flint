@@ -22,6 +22,9 @@ PLAN.md
 archive/
 test-output/
 
+# Local config — master copy lives in the deploy repo
+config.toml
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
