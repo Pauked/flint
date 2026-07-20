@@ -226,7 +226,7 @@ fn generate_html(report: &SyncReport) -> String {
             )
         } else {
             let mut sorted_books = synced_books;
-            sorted_books.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+            sorted_books.sort_by_key(|book| book.title.to_lowercase());
             let mut lines = String::new();
             for book in &sorted_books {
                 let detail = format!(
@@ -379,7 +379,7 @@ fn generate_plain_text(report: &SyncReport) -> String {
         .collect();
     if !synced_books.is_empty() {
         let mut sorted_books = synced_books;
-        sorted_books.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        sorted_books.sort_by_key(|book| book.title.to_lowercase());
         text.push_str("\nBooks:\n");
         for book in &sorted_books {
             text.push_str(&format!(

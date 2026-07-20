@@ -164,7 +164,7 @@ resend_api_key = "re_xxx..."
 
 ## Output format
 
-Files are written with Obsidian-compatible YAML frontmatter (`kindle-*` properties) and block references. Highlight colors are rendered using [Highlightr](https://github.com/chetachiezikeuzor/Highlightr-Plugin) syntax. Filenames are sanitized to avoid characters that break Obsidian links (`# ^ [ ] |`). Both the flat format and legacy nested `kindle-sync:` format are supported for reading existing files.
+Files are written with Obsidian-compatible YAML frontmatter (`kindle-*` properties) and block references. Highlight colors are rendered as `<mark class="hltr-*">` — see [Highlight colors](#highlight-colors) for the CSS that makes them show up. Filenames are sanitized to avoid characters that break Obsidian links (`# ^ [ ] |`). Both the flat format and legacy nested `kindle-sync:` format are supported for reading existing files.
 
 ```markdown
 ---
@@ -190,6 +190,33 @@ Habits are the compound interest of self-improvement. — <mark class="hltr-y">y
 
 ---
 ```
+
+### Highlight colors
+
+Flint tags each highlight with its Kindle color as `<mark class="hltr-y">yellow</mark>`
+(`y` yellow, `g` green, `p` pink, `b` blue, `r` red, `o` orange). Obsidian needs CSS
+for those classes, otherwise the color name renders as plain text.
+
+These class names originally came from the Highlightr plugin, which has since been
+removed from the community plugin store — existing installs keep working, but it can
+no longer be installed or re-enabled. Flint therefore ships its own CSS snippet:
+
+```bash
+flint snippet install     # write the snippet into your vault and enable it
+flint snippet status      # is it installed? enabled? edited locally?
+flint snippet remove      # delete it and disable it
+```
+
+The vault is found by walking up from your `output_dir` to the nearest `.obsidian`
+directory; pass `--vault <path>` to name one explicitly. Install and remove both
+refuse to touch a snippet you have edited yourself — pass `--force` to override,
+which is also how you take an updated snippet after a Flint upgrade.
+
+Enabling writes the snippet name into the vault's `appearance.json`, leaving every
+other setting intact. If Obsidian is running when you install, reload it (or toggle
+the snippet in Settings → Appearance) to pick up the change.
+
+To restyle the colors, edit the snippet in place — Flint will then leave it alone.
 
 ## Design notes
 

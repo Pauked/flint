@@ -1,0 +1,26 @@
+/* Flint highlight colours for Obsidian.
+   Flint renders Kindle highlight colours as <mark class="hltr-{y|g|p|b|r|o}">name</mark>.
+   This snippet supplies the backgrounds for those classes.
+
+   Historically these classes came from the Highlightr plugin, which has since been
+   removed from the Obsidian community store. This snippet replaces it, so Flint
+   notes render in colour with no plugin installed.
+
+   Backgrounds are alpha-blended so the same values work in light and dark themes.
+   The doubled selector and !important outrank themes (e.g. Minimal) that style
+   `mark` from their own --text-highlight-bg variable.
+
+   Managed by `flint snippet install` / `flint snippet remove`. */
+
+mark[class^="hltr-"] {
+  color: inherit !important;
+  border-radius: 3px;
+  padding: 0 0.2em;
+}
+
+mark.hltr-y.hltr-y { background: rgba(255, 200, 0,   0.35) !important; }  /* yellow */
+mark.hltr-g.hltr-g { background: rgba(60,  200, 120, 0.35) !important; }  /* green  */
+mark.hltr-p.hltr-p { background: rgba(255, 105, 180, 0.35) !important; }  /* pink   */
+mark.hltr-b.hltr-b { background: rgba(70,  150, 255, 0.35) !important; }  /* blue   */
+mark.hltr-r.hltr-r { background: rgba(255, 80,  80,  0.35) !important; }  /* red    */
+mark.hltr-o.hltr-o { background: rgba(255, 145, 40,  0.35) !important; }  /* orange */

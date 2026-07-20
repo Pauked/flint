@@ -5,6 +5,7 @@ mod log_config;
 mod models;
 mod renderer;
 mod scraper;
+mod snippet;
 mod sync;
 
 use std::path::PathBuf;
@@ -103,6 +104,44 @@ enum Commands {
         #[arg(long)]
         use_archive: Option<PathBuf>,
     },
+
+    /// Manage the Obsidian CSS snippet that colours highlights
+    Snippet {
+        #[command(subcommand)]
+        action: SnippetAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnippetAction {
+    /// Install the snippet into your vault and enable it
+    Install {
+        /// Vault to install into (defaults to the vault containing your output directory)
+        #[arg(long)]
+        vault: Option<PathBuf>,
+
+        /// Overwrite a snippet you have edited locally
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Remove the snippet from your vault
+    Remove {
+        /// Vault to remove from (defaults to the vault containing your output directory)
+        #[arg(long)]
+        vault: Option<PathBuf>,
+
+        /// Delete a snippet you have edited locally
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Show whether the snippet is installed and enabled
+    Status {
+        /// Vault to inspect (defaults to the vault containing your output directory)
+        #[arg(long)]
+        vault: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -158,7 +197,93 @@ fn run(cli: Cli, log_handle: &log4rs::Handle) -> Result<()> {
             save_archive.as_deref(),
             use_archive.as_deref(),
         ),
+        Commands::Snippet { action } => cmd_snippet(&config, action),
     }
+}
+
+fn cmd_snippet(config: &config::Config, action: SnippetAction) -> Result<()> {
+    let green = "\x1b[32m";
+    let yellow = "\x1b[33m";
+    let reset = "\x1b[0m";
+
+    match action {
+        SnippetAction::Install { vault, force } => {
+            let vault = snippet::resolve_vault(vault.as_deref(), &config.output_dir())?;
+            match snippet::install(&vault, force)? {
+                snippet::InstallOutcome::Installed => {
+                    println!(
+                        "{green}Installed{reset} {} in {}",
+                        snippet::SNIPPET_NAME,
+                        vault.display()
+                    );
+                }
+                snippet::InstallOutcome::Updated => {
+                    println!(
+                        "{green}Updated{reset} {} in {}",
+                        snippet::SNIPPET_NAME,
+                        vault.display()
+                    );
+                }
+                snippet::InstallOutcome::AlreadyCurrent => {
+                    println!(
+                        "{} is already up to date in {}",
+                        snippet::SNIPPET_NAME,
+                        vault.display()
+                    );
+                }
+                snippet::InstallOutcome::RefusedModified => {
+                    println!(
+                        "{yellow}Skipped:{reset} {} has local edits. Re-run with --force to overwrite.",
+                        snippet::SNIPPET_NAME
+                    );
+                    return Ok(());
+                }
+            }
+            println!(
+                "If Obsidian is running, reload it (or toggle the snippet in Settings → Appearance) to pick it up."
+            );
+        }
+
+        SnippetAction::Remove { vault, force } => {
+            let vault = snippet::resolve_vault(vault.as_deref(), &config.output_dir())?;
+            match snippet::remove(&vault, force)? {
+                snippet::RemoveOutcome::Removed => {
+                    println!(
+                        "{green}Removed{reset} {} from {}",
+                        snippet::SNIPPET_NAME,
+                        vault.display()
+                    );
+                }
+                snippet::RemoveOutcome::NotInstalled => {
+                    println!(
+                        "{} is not installed in {}",
+                        snippet::SNIPPET_NAME,
+                        vault.display()
+                    );
+                }
+                snippet::RemoveOutcome::RefusedModified => {
+                    println!(
+                        "{yellow}Skipped:{reset} {} has local edits. Re-run with --force to delete it.",
+                        snippet::SNIPPET_NAME
+                    );
+                }
+            }
+        }
+
+        SnippetAction::Status { vault } => {
+            let vault = snippet::resolve_vault(vault.as_deref(), &config.output_dir())?;
+            let status = snippet::status(&vault)?;
+            println!("Vault:     {}", vault.display());
+            println!("Snippet:   {}", snippet::SNIPPET_NAME);
+            println!("Installed: {}", if status.installed { "yes" } else { "no" });
+            println!("Enabled:   {}", if status.enabled { "yes" } else { "no" });
+            if status.modified {
+                println!("{yellow}Locally edited — install/remove will need --force.{reset}");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_login(

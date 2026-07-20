@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -298,7 +299,7 @@ fn diff_and_merge(
     }
 
     // Sort insertions by line number descending so we insert from bottom up
-    insertions.sort_by(|a, b| b.0.cmp(&a.0));
+    insertions.sort_by_key(|(line_num, _)| Reverse(*line_num));
 
     for (line_num, content) in insertions {
         let insert_lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();

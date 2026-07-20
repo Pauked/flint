@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.6] - 2026-07-20
+
+### Added
+- `flint snippet install` / `remove` / `status` — manages the CSS snippet that colours highlights in an Obsidian vault
+- Snippet is enabled and disabled in the vault's `appearance.json`, preserving all other settings
+- Vault auto-detected from `output_dir`; `--vault` overrides it
+- Locally edited snippets are protected — `install` and `remove` refuse to touch them without `--force`
+
+### Changed
+- Highlight colours no longer depend on the Highlightr plugin, which has been removed from the Obsidian community store
+- Book sorting in email reports and highlight insertion ordering now use `sort_by_key`; clippy is warning-free
+
 ## [0.2.5] - 2026-03-07
 
 ### Added
