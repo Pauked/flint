@@ -3,11 +3,44 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use tera::Tera;
 
+use crate::config::{ColourStyle, Config, HighlightColours, HighlightLayout};
 use crate::models::{Book, BookHighlights, Highlight};
 use crate::scraper::{kindle_app_link, parsed_author_names};
 
 const DEFAULT_FILE_TEMPLATE: &str = include_str!("../templates/book.tera");
-const DEFAULT_HIGHLIGHT_TEMPLATE: &str = include_str!("../templates/highlight.tera");
+const LINE_HIGHLIGHT_TEMPLATE: &str = include_str!("../templates/highlight.tera");
+const QUOTE_HIGHLIGHT_TEMPLATE: &str = include_str!("../templates/highlight_quote.tera");
+
+/// Template, layout and colour settings shared by every render.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderOptions<'a> {
+    pub file_template: Option<&'a str>,
+    pub highlight_template: Option<&'a str>,
+    pub filename_template: Option<&'a str>,
+    pub layout: HighlightLayout,
+    pub colours: HighlightColours,
+}
+
+impl<'a> RenderOptions<'a> {
+    pub fn from_config(config: &'a Config) -> Self {
+        let templates = config.templates.as_ref();
+        Self {
+            file_template: templates.and_then(|t| t.file_template.as_deref()),
+            highlight_template: templates.and_then(|t| t.highlight_template.as_deref()),
+            filename_template: templates.and_then(|t| t.filename_template.as_deref()),
+            layout: config.highlight_layout(),
+            colours: config.highlight_colours(),
+        }
+    }
+
+    /// The highlight template: the configured one, else the layout's built-in.
+    pub fn highlight_template_source(&self) -> &'a str {
+        self.highlight_template.unwrap_or(match self.layout {
+            HighlightLayout::Quote => QUOTE_HIGHLIGHT_TEMPLATE,
+            HighlightLayout::Line => LINE_HIGHLIGHT_TEMPLATE,
+        })
+    }
+}
 
 /// Escape a string for use in a YAML single-quoted value.
 /// In YAML, single quotes are escaped by doubling them: ' → ''
@@ -15,19 +48,11 @@ fn escape_yaml(s: &str) -> String {
     s.replace('\'', "''").replace('\n', " ")
 }
 
-/// Render YAML frontmatter for a book.
-///
-/// `format` controls the output layout:
-/// - `"flat"` (default): Obsidian properties (`kindle-bookId`, `kindle-title`, etc.)
-/// - `"nested"`: legacy `kindle-sync:` wrapper with indented keys
-pub fn render_frontmatter(book: &Book, highlights_count: usize, format: &str) -> String {
-    if format == "nested" {
-        return render_frontmatter_nested(book, highlights_count);
-    }
-
+/// Render the Obsidian properties block for a book.
+pub fn render_frontmatter(book: &Book, highlights_count: usize) -> String {
     let mut fm = String::from("---\n");
 
-    fm.push_str(&format!("kindle-bookId: '{}'\n", book.id));
+    fm.push_str(&format!("kindle-book-id: '{}'\n", book.id));
     fm.push_str(&format!("kindle-title: '{}'\n", escape_yaml(&book.title)));
 
     // Author: only quote if it contains special YAML characters
@@ -53,69 +78,20 @@ pub fn render_frontmatter(book: &Book, highlights_count: usize, format: &str) ->
 
     if let Some(ref date) = book.last_annotated_date {
         fm.push_str(&format!(
-            "kindle-lastAnnotatedDate: '{}'\n",
+            "kindle-last-annotated-date: '{}'\n",
             date.format("%Y-%m-%d")
         ));
     }
 
     if let Some(ref img) = book.image_url {
-        fm.push_str(&format!("kindle-bookImageUrl: '{}'\n", escape_yaml(img)));
+        fm.push_str(&format!("kindle-book-image-url: '{}'\n", escape_yaml(img)));
     }
 
-    fm.push_str(&format!("kindle-highlightsCount: {highlights_count}\n"));
+    fm.push_str(&format!("kindle-highlights-count: {highlights_count}\n"));
 
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M");
-    fm.push_str(&format!("flint-lastSyncDate: '{now}'\n"));
+    fm.push_str(&format!("flint-last-sync-date: '{now}'\n"));
     fm.push_str(&format!("flint-version: {}\n", env!("CARGO_PKG_VERSION")));
-
-    fm.push_str("---\n");
-
-    fm
-}
-
-/// Render frontmatter in the legacy nested `kindle-sync:` format.
-fn render_frontmatter_nested(book: &Book, highlights_count: usize) -> String {
-    let mut fm = String::from("---\nkindle-sync:\n");
-
-    fm.push_str(&format!("  bookId: '{}'\n", book.id));
-    fm.push_str(&format!("  title: '{}'\n", escape_yaml(&book.title)));
-
-    let author = &book.author;
-    if author.contains(':')
-        || author.contains(',')
-        || author.contains('#')
-        || author.contains('\'')
-        || author.contains('"')
-        || author.contains('[')
-        || author.contains(']')
-        || author.contains('{')
-        || author.contains('}')
-    {
-        fm.push_str(&format!("  author: '{}'\n", escape_yaml(author)));
-    } else {
-        fm.push_str(&format!("  author: {author}\n"));
-    }
-
-    if let Some(ref asin) = book.asin {
-        fm.push_str(&format!("  asin: {asin}\n"));
-    }
-
-    if let Some(ref date) = book.last_annotated_date {
-        fm.push_str(&format!(
-            "  lastAnnotatedDate: '{}'\n",
-            date.format("%Y-%m-%d")
-        ));
-    }
-
-    if let Some(ref img) = book.image_url {
-        fm.push_str(&format!("  bookImageUrl: '{}'\n", escape_yaml(img)));
-    }
-
-    fm.push_str(&format!("  highlightsCount: {highlights_count}\n"));
-
-    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M");
-    fm.push_str(&format!("  lastSyncDate: '{now}'\n"));
-    fm.push_str(&format!("  version: {}\n", env!("CARGO_PKG_VERSION")));
 
     fm.push_str("---\n");
 
@@ -135,12 +111,57 @@ fn highlight_color_code(color: &str) -> &str {
     }
 }
 
+/// The highlight text, coloured when `text` is on and Kindle gave a colour.
+fn coloured_text(text: &str, color: &str, colours: HighlightColours) -> String {
+    if colours.text && !color.is_empty() {
+        paint(text, color, colours.style)
+    } else {
+        text.to_string()
+    }
+}
+
+/// The colour name, coloured when `label` is on.
+fn colour_label(color: &str, colours: HighlightColours) -> String {
+    if colours.label && !color.is_empty() {
+        paint(color, color, colours.style)
+    } else {
+        color.to_string()
+    }
+}
+
+/// Wrap `content` in `color`. Obsidian style leaves text that already holds
+/// `==` alone, since that would end the highlight early.
+fn paint(content: &str, color: &str, style: ColourStyle) -> String {
+    match style {
+        ColourStyle::Obsidian if content.contains("==") => content.to_string(),
+        ColourStyle::Obsidian => format!("=={}{content}==", obsidian_color_emoji(color)),
+        ColourStyle::Painter => format!(
+            "<mark class=\"hltr-{}\">{content}</mark>",
+            highlight_color_code(color)
+        ),
+    }
+}
+
+/// Obsidian's colour prefix for a Kindle colour. Yellow (and anything
+/// unrecognised) gets none: a bare `==text==` is Obsidian's default yellow.
+fn obsidian_color_emoji(color: &str) -> &'static str {
+    match color {
+        "red" => "🔴",
+        "orange" => "🟠",
+        "green" => "🟢",
+        "blue" | "aqua" => "🔵",
+        "pink" => "🟣",
+        _ => "",
+    }
+}
+
 /// Render a single highlight to markdown using a Tera template.
 pub fn render_highlight(
     tera: &Tera,
     template_name: &str,
     highlight: &Highlight,
     book: &Book,
+    colours: HighlightColours,
 ) -> Result<String> {
     let mut ctx = tera::Context::new();
     ctx.insert("id", &highlight.id);
@@ -151,6 +172,11 @@ pub fn render_highlight(
     let color = highlight.color.as_deref().unwrap_or("");
     ctx.insert("color", &color);
     ctx.insert("color_code", highlight_color_code(color));
+    let text = highlight.text.as_deref().unwrap_or("");
+    ctx.insert("coloured_text", &coloured_text(text, color, colours));
+    let block_ref = format!("^ref-{}", highlight.id);
+    ctx.insert("block_ref", &block_ref);
+    ctx.insert("colour_label", &colour_label(color, colours));
 
     let app_link = book
         .asin
@@ -162,8 +188,13 @@ pub fn render_highlight(
         .render(template_name, &ctx)
         .with_context(|| "Failed to render highlight template")?;
 
-    // Append block reference to the line containing the highlight text
-    let ref_suffix = format!(" ^ref-{}", highlight.id);
+    // A template that places {{block_ref}} itself gets it where it put it
+    if rendered.contains(&block_ref) {
+        return Ok(rendered.lines().map(|line| format!("{line}\n")).collect());
+    }
+
+    // Otherwise append it to the line containing the highlight text
+    let ref_suffix = format!(" {block_ref}");
     let lines: Vec<&str> = rendered.lines().collect();
 
     let mut result = String::new();
@@ -214,6 +245,7 @@ pub fn render_file(
     file_template_name: &str,
     highlight_template_name: &str,
     entry: &BookHighlights,
+    colours: HighlightColours,
 ) -> Result<String> {
     let book = &entry.book;
 
@@ -221,7 +253,7 @@ pub fn render_file(
     let rendered_highlights: Vec<String> = entry
         .highlights
         .iter()
-        .map(|h| render_highlight(tera, highlight_template_name, h, book))
+        .map(|h| render_highlight(tera, highlight_template_name, h, book, colours))
         .collect::<Result<Vec<_>>>()?;
 
     let highlights_str = rendered_highlights.join("");
@@ -327,33 +359,28 @@ fn dateformat(
 }
 
 /// Build a Tera instance with default or custom templates loaded.
-pub fn build_tera(file_template: Option<&str>, highlight_template: Option<&str>) -> Result<Tera> {
+pub fn build_tera(options: &RenderOptions) -> Result<Tera> {
     let mut tera = Tera::default();
 
     tera.register_filter("dateformat", dateformat);
 
-    tera.add_raw_template("book.tera", file_template.unwrap_or(DEFAULT_FILE_TEMPLATE))
-        .context("Failed to parse file template")?;
-
     tera.add_raw_template(
-        "highlight.tera",
-        highlight_template.unwrap_or(DEFAULT_HIGHLIGHT_TEMPLATE),
+        "book.tera",
+        options.file_template.unwrap_or(DEFAULT_FILE_TEMPLATE),
     )
-    .context("Failed to parse highlight template")?;
+    .context("Failed to parse file template")?;
+
+    tera.add_raw_template("highlight.tera", options.highlight_template_source())
+        .context("Failed to parse highlight template")?;
 
     Ok(tera)
 }
 
 /// Render a complete markdown file (frontmatter + content) for a book.
-pub fn render_book_file(
-    entry: &BookHighlights,
-    file_template: Option<&str>,
-    highlight_template: Option<&str>,
-    frontmatter_format: &str,
-) -> Result<String> {
-    let tera = build_tera(file_template, highlight_template)?;
-    let frontmatter = render_frontmatter(&entry.book, entry.highlights.len(), frontmatter_format);
-    let content = render_file(&tera, "book.tera", "highlight.tera", entry)?;
+pub fn render_book_file(entry: &BookHighlights, options: &RenderOptions) -> Result<String> {
+    let tera = build_tera(options)?;
+    let frontmatter = render_frontmatter(&entry.book, entry.highlights.len());
+    let content = render_file(&tera, "book.tera", "highlight.tera", entry, options.colours)?;
 
     Ok(format!("{frontmatter}{content}"))
 }
@@ -362,16 +389,13 @@ pub fn render_book_file(
 pub fn render_single_highlight(
     highlight: &Highlight,
     book: &Book,
-    highlight_template: Option<&str>,
+    options: &RenderOptions,
 ) -> Result<String> {
     let mut tera = Tera::default();
-    tera.add_raw_template(
-        "highlight.tera",
-        highlight_template.unwrap_or(DEFAULT_HIGHLIGHT_TEMPLATE),
-    )
-    .context("Failed to parse highlight template")?;
+    tera.add_raw_template("highlight.tera", options.highlight_template_source())
+        .context("Failed to parse highlight template")?;
 
-    render_highlight(&tera, "highlight.tera", highlight, book)
+    render_highlight(&tera, "highlight.tera", highlight, book, options.colours)
 }
 
 #[cfg(test)]
@@ -451,39 +475,39 @@ mod tests {
     }
 
     #[test]
-    fn test_render_frontmatter_flat() {
-        let book = sample_book();
-        let fm = render_frontmatter(&book, 10, "flat");
-        assert!(!fm.contains("kindle-sync:"));
-        assert!(fm.contains("kindle-bookId: '12345'"));
-        assert!(fm.contains("kindle-title: 'Test Book: A Subtitle'"));
-        assert!(fm.contains("kindle-author: John Doe"));
-        assert!(fm.contains("kindle-asin: B01TEST"));
-        assert!(fm.contains("kindle-lastAnnotatedDate: '2024-01-15'"));
-        assert!(fm.contains("kindle-highlightsCount: 10"));
-        assert!(fm.contains("flint-lastSyncDate:"));
+    fn frontmatter_keys_are_kebab_case() {
+        let fm = render_frontmatter(&sample_book(), 10);
+        let keys: Vec<&str> = fm
+            .lines()
+            .filter_map(|line| line.split_once(':').map(|(key, _)| key))
+            .filter(|key| key.starts_with("kindle-") || key.starts_with("flint-"))
+            .collect();
+        assert_eq!(keys.len(), 9, "{fm}");
+        for key in keys {
+            assert_eq!(key, key.to_lowercase(), "{fm}");
+        }
     }
 
     #[test]
-    fn test_render_frontmatter_nested() {
+    fn test_render_frontmatter_flat() {
         let book = sample_book();
-        let fm = render_frontmatter(&book, 10, "nested");
-        assert!(fm.contains("kindle-sync:\n"));
-        assert!(fm.contains("  bookId: '12345'"));
-        assert!(fm.contains("  title: 'Test Book: A Subtitle'"));
-        assert!(fm.contains("  author: John Doe"));
-        assert!(fm.contains("  asin: B01TEST"));
-        assert!(fm.contains("  lastAnnotatedDate: '2024-01-15'"));
-        assert!(fm.contains("  highlightsCount: 10"));
-        assert!(fm.contains("  lastSyncDate:"));
-        assert!(!fm.contains("kindle-bookId:"));
+        let fm = render_frontmatter(&book, 10);
+        assert!(!fm.contains("kindle-sync:"));
+        assert!(fm.contains("kindle-book-id: '12345'"));
+        assert!(fm.contains("kindle-title: 'Test Book: A Subtitle'"));
+        assert!(fm.contains("kindle-author: John Doe"));
+        assert!(fm.contains("kindle-asin: B01TEST"));
+        assert!(fm.contains("kindle-last-annotated-date: '2024-01-15'"));
+        assert!(fm.contains("kindle-highlights-count: 10"));
+        assert!(fm.contains("flint-last-sync-date:"));
     }
 
     #[test]
     fn test_render_highlight() {
         let book = sample_book();
         let highlight = sample_highlight();
-        let rendered = render_single_highlight(&highlight, &book, None).unwrap();
+        let rendered =
+            render_single_highlight(&highlight, &book, &RenderOptions::default()).unwrap();
         assert!(rendered.contains("This is a test highlight."));
         assert!(rendered.contains("location: [100]"));
         assert!(rendered.contains("^ref-54321"));
@@ -498,7 +522,8 @@ mod tests {
             note: Some("My note here".to_string()),
             ..sample_highlight()
         };
-        let rendered = render_single_highlight(&highlight, &book, None).unwrap();
+        let rendered =
+            render_single_highlight(&highlight, &book, &RenderOptions::default()).unwrap();
         assert!(rendered.contains("My note here"));
     }
 
@@ -513,8 +538,8 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let result = render_book_file(&entry, None, None, "flat").unwrap();
-        assert!(result.contains("---\nkindle-bookId:"));
+        let result = render_book_file(&entry, &RenderOptions::default()).unwrap();
+        assert!(result.contains("---\nkindle-book-id:"));
         assert!(result.contains("# Test Book"));
         assert!(result.contains("## Metadata"));
         assert!(result.contains("* ASIN: B01TEST"));
@@ -535,7 +560,8 @@ mod tests {
             note: None,
             color: None,
         };
-        let rendered = render_single_highlight(&highlight, &book, None).unwrap();
+        let rendered =
+            render_single_highlight(&highlight, &book, &RenderOptions::default()).unwrap();
         assert!(rendered.contains("^ref-99999"));
         assert!(rendered.contains("\u{2018}I don\u{2019}t know"));
     }
@@ -551,7 +577,8 @@ mod tests {
             note: Some("My standalone note".to_string()),
             color: None,
         };
-        let rendered = render_single_highlight(&highlight, &book, None).unwrap();
+        let rendered =
+            render_single_highlight(&highlight, &book, &RenderOptions::default()).unwrap();
         assert!(rendered.contains("My standalone note"));
         assert!(rendered.contains("^ref-note1"));
     }
@@ -593,15 +620,15 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let result = render_book_file(&entry, None, None, "flat").unwrap();
+        let result = render_book_file(&entry, &LINE).unwrap();
 
         // Verify frontmatter
         assert!(result.starts_with("---\n"));
-        assert!(result.contains("kindle-bookId: '49849'"));
+        assert!(result.contains("kindle-book-id: '49849'"));
         assert!(result.contains("kindle-author: James Clear\n"));
         assert!(result.contains("kindle-asin: B01N5AX61W\n"));
-        assert!(result.contains("kindle-lastAnnotatedDate: '2024-08-27'"));
-        assert!(result.contains("kindle-highlightsCount: 1"));
+        assert!(result.contains("kindle-last-annotated-date: '2024-08-27'"));
+        assert!(result.contains("kindle-highlights-count: 1"));
 
         // Verify metadata section
         assert!(result.contains("# Atomic Habits"));
@@ -613,8 +640,245 @@ mod tests {
 
         // Verify highlight format
         assert!(result.contains(
-            "improving by 1 percent isn't particularly notable — <mark class=\"hltr-y\">yellow</mark> | location: [250](kindle://book?action=open&asin=B01N5AX61W&location=250) ^ref-54880"
+            "==improving by 1 percent isn't particularly notable== — ==yellow== | location: [250](kindle://book?action=open&asin=B01N5AX61W&location=250) ^ref-54880"
         ));
         assert!(result.contains("---"));
+    }
+
+    fn render_with(colours: HighlightColours, color: Option<&str>) -> Result<String> {
+        let highlight = Highlight {
+            color: color.map(str::to_string),
+            ..sample_highlight()
+        };
+        let options = RenderOptions { colours, ..LINE };
+        render_single_highlight(&highlight, &sample_book(), &options)
+    }
+
+    const LINE: RenderOptions<'static> = RenderOptions {
+        file_template: None,
+        highlight_template: None,
+        filename_template: None,
+        layout: HighlightLayout::Line,
+        colours: HighlightColours {
+            style: ColourStyle::Obsidian,
+            text: true,
+            label: true,
+        },
+    };
+
+    fn render_quote(highlight: &Highlight) -> Result<String> {
+        render_single_highlight(highlight, &sample_book(), &RenderOptions::default())
+    }
+
+    #[test]
+    fn quote_layout_puts_block_ref_on_metadata_line_not_quote() -> Result<()> {
+        let rendered = render_quote(&sample_highlight())?;
+        let quote_line = rendered.lines().next().unwrap_or_default();
+        assert!(!quote_line.contains("^ref-"), "{rendered}");
+        assert_eq!(rendered.matches("^ref-54321").count(), 1, "{rendered}");
+        Ok(())
+    }
+
+    #[test]
+    fn template_placed_block_ref_is_not_appended_again() -> Result<()> {
+        let options = RenderOptions {
+            highlight_template: Some("{{text}}\n{{block_ref}} end"),
+            ..RenderOptions::default()
+        };
+        let rendered = render_single_highlight(&sample_highlight(), &sample_book(), &options)?;
+        assert_eq!(rendered, "This is a test highlight.\n^ref-54321 end\n");
+        Ok(())
+    }
+
+    #[test]
+    fn quote_layout_is_default() -> Result<()> {
+        let highlight = Highlight {
+            color: Some("pink".to_string()),
+            ..sample_highlight()
+        };
+        assert_eq!(
+            render_quote(&highlight)?,
+            "> This is a test highlight.\n\n**Highlight** (==🟣pink==) - location: [100](kindle://book?action=open&asin=B01TEST&location=100) ^ref-54321\n\n---\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quote_layout_puts_note_after_metadata() -> Result<()> {
+        let highlight = Highlight {
+            note: Some("My note.".to_string()),
+            ..sample_highlight()
+        };
+        assert_eq!(
+            render_quote(&highlight)?,
+            "> This is a test highlight.\n\n**Highlight** (==yellow==) - location: [100](kindle://book?action=open&asin=B01TEST&location=100) ^ref-54321\n\nMy note.\n\n---\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quote_layout_renders_note_only_entry_without_quote() -> Result<()> {
+        let highlight = Highlight {
+            text: None,
+            color: None,
+            note: Some("Standalone.".to_string()),
+            ..sample_highlight()
+        };
+        assert_eq!(
+            render_quote(&highlight)?,
+            "**Note** - location: [100](kindle://book?action=open&asin=B01TEST&location=100) ^ref-54321\n\nStandalone.\n\n---\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quote_layout_without_colour_drops_label() -> Result<()> {
+        let highlight = Highlight {
+            color: None,
+            ..sample_highlight()
+        };
+        assert!(
+            render_quote(&highlight)?.contains("\n\n**Highlight** - location: [100]"),
+            "{}",
+            render_quote(&highlight)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn custom_template_overrides_layout() -> Result<()> {
+        let options = RenderOptions {
+            highlight_template: Some("{{text}}!"),
+            ..RenderOptions::default()
+        };
+        let rendered = render_single_highlight(&sample_highlight(), &sample_book(), &options)?;
+        assert!(
+            rendered.starts_with("This is a test highlight.! ^ref-54321"),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    const PAINTER_LABEL: HighlightColours = HighlightColours {
+        style: ColourStyle::Painter,
+        text: false,
+        label: true,
+    };
+
+    #[test]
+    fn obsidian_text_and_label_colour_both() -> Result<()> {
+        let rendered = render_with(LINE.colours, Some("pink"))?;
+        assert!(
+            rendered.starts_with(
+                "==🟣This is a test highlight.== — ==🟣pink== | location: [100](kindle://book?action=open&asin=B01TEST&location=100) ^ref-54321\n"
+            ),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn obsidian_emoji_per_kindle_colour() -> Result<()> {
+        let cases = [
+            ("yellow", ""),
+            ("orange", "🟠"),
+            ("green", "🟢"),
+            ("blue", "🔵"),
+            ("aqua", "🔵"),
+            ("pink", "🟣"),
+            ("red", "🔴"),
+        ];
+        for (color, emoji) in cases {
+            let rendered = render_with(LINE.colours, Some(color))?;
+            let expected = format!("=={emoji}This is a test highlight.== — =={emoji}{color}== |");
+            assert!(rendered.starts_with(&expected), "{color}: {rendered}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn painter_label_only_matches_previous_output() -> Result<()> {
+        let rendered = render_with(PAINTER_LABEL, Some("yellow"))?;
+        assert!(
+            rendered.starts_with(
+                "This is a test highlight. — <mark class=\"hltr-y\">yellow</mark> | location:"
+            ),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn painter_text_wraps_passage_in_mark() -> Result<()> {
+        let colours = HighlightColours {
+            text: true,
+            ..PAINTER_LABEL
+        };
+        let rendered = render_with(colours, Some("pink"))?;
+        assert!(
+            rendered.starts_with(
+                "<mark class=\"hltr-p\">This is a test highlight.</mark> — <mark class=\"hltr-p\">pink</mark> |"
+            ),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn colours_off_leave_text_and_label_plain() -> Result<()> {
+        let colours = HighlightColours {
+            text: false,
+            label: false,
+            ..HighlightColours::default()
+        };
+        let rendered = render_with(colours, Some("pink"))?;
+        assert!(
+            rendered.starts_with("This is a test highlight. — pink | location:"),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uncoloured_highlight_is_not_painted() -> Result<()> {
+        let rendered = render_with(HighlightColours::default(), None)?;
+        assert!(
+            rendered.starts_with("This is a test highlight. — location:"),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn text_containing_highlight_marker_is_left_unwrapped() -> Result<()> {
+        let highlight = Highlight {
+            text: Some("if a == b then".to_string()),
+            color: Some("blue".to_string()),
+            ..sample_highlight()
+        };
+        let rendered = render_single_highlight(&highlight, &sample_book(), &LINE)?;
+        assert!(
+            rendered.starts_with("if a == b then — ==🔵blue== |"),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn custom_template_keeps_raw_variables() -> Result<()> {
+        let options = RenderOptions {
+            highlight_template: Some("{{text}} [{{color}}/{{color_code}}]"),
+            ..RenderOptions::default()
+        };
+        let highlight = Highlight {
+            color: Some("pink".to_string()),
+            ..sample_highlight()
+        };
+        let rendered = render_single_highlight(&highlight, &sample_book(), &options)?;
+        assert!(
+            rendered.starts_with("This is a test highlight. [pink/p] ^ref-54321"),
+            "{rendered}"
+        );
+        Ok(())
     }
 }

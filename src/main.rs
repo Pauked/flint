@@ -311,7 +311,6 @@ fn cmd_check_config(config: &config::Config, data_dir: &std::path::Path) -> Resu
     // Display config
     println!("Region:             {}", config.region_name());
     println!("Output directory:   {}", config.output_dir().display());
-    println!("Frontmatter format: {}", config.frontmatter_format());
     println!("Download metadata:  {}", config.download_metadata());
     println!("Log directory:      {}", config.log_dir(data_dir).display());
     println!("Keep logs (days):   {}", config.keep_logs_days());
@@ -334,12 +333,9 @@ fn cmd_check_config(config: &config::Config, data_dir: &std::path::Path) -> Resu
     }
 
     // Build Tera and validate templates
-    let templates = config.templates.as_ref();
-    let file_template = templates.and_then(|t| t.file_template.as_deref());
-    let highlight_template = templates.and_then(|t| t.highlight_template.as_deref());
-    let filename_template = templates.and_then(|t| t.filename_template.as_deref());
+    let render_options = renderer::RenderOptions::from_config(config);
 
-    let tera = match renderer::build_tera(file_template, highlight_template) {
+    let tera = match renderer::build_tera(&render_options) {
         Ok(t) => {
             println!("{green}OK{reset}  Templates parse successfully.");
             Some(t)
@@ -383,7 +379,13 @@ fn cmd_check_config(config: &config::Config, data_dir: &std::path::Path) -> Resu
             metadata: Some(dummy_metadata),
         };
 
-        match renderer::render_file(&tera, "book.tera", "highlight.tera", &dummy_entry) {
+        match renderer::render_file(
+            &tera,
+            "book.tera",
+            "highlight.tera",
+            &dummy_entry,
+            render_options.colours,
+        ) {
             Ok(_) => println!("{green}OK{reset}  Test render succeeded."),
             Err(e) => {
                 println!("{red}ERR{reset} Test render failed: {e}");
@@ -416,7 +418,7 @@ fn cmd_check_config(config: &config::Config, data_dir: &std::path::Path) -> Resu
     }
 
     // Validate filename template
-    if let Some(tmpl) = filename_template {
+    if let Some(tmpl) = render_options.filename_template {
         let dummy_book = models::Book {
             id: "00000".to_string(),
             title: "Test Book".to_string(),
@@ -540,12 +542,7 @@ fn cmd_sync(
     let region = config::get_region(region_name)?;
     let output_dir = output_dir_override.unwrap_or_else(|| config.output_dir());
     let download_metadata = config.download_metadata();
-    let frontmatter_format = config.frontmatter_format();
-
-    let templates = config.templates.as_ref();
-    let file_template = templates.and_then(|t| t.file_template.as_deref());
-    let highlight_template = templates.and_then(|t| t.highlight_template.as_deref());
-    let filename_template = templates.and_then(|t| t.filename_template.as_deref());
+    let render_options = renderer::RenderOptions::from_config(config);
 
     let use_arc = use_archive.as_deref().map(Archive::new);
     let save_arc = save_archive.as_deref().map(Archive::new);
@@ -571,10 +568,7 @@ fn cmd_sync(
         region,
         &output_dir,
         download_metadata,
-        frontmatter_format,
-        file_template,
-        highlight_template,
-        filename_template,
+        &render_options,
         use_arc.as_ref(),
         save_arc.as_ref(),
         sync_all,
@@ -639,10 +633,7 @@ fn run_sync(
     region: &config::AmazonRegion,
     output_dir: &std::path::Path,
     download_metadata: bool,
-    frontmatter_format: &str,
-    file_template: Option<&str>,
-    highlight_template: Option<&str>,
-    filename_template: Option<&str>,
+    render_options: &renderer::RenderOptions,
     use_arc: Option<&Archive>,
     save_arc: Option<&Archive>,
     sync_all: bool,
@@ -759,15 +750,7 @@ fn run_sync(
 
         let existing_file = existing.find(book);
 
-        let path = sync::sync_book(
-            &entry,
-            output_dir,
-            existing_file,
-            file_template,
-            highlight_template,
-            filename_template,
-            frontmatter_format,
-        )?;
+        let path = sync::sync_book(&entry, output_dir, existing_file, render_options)?;
 
         let hl_count = entry.highlights.len();
         let book_elapsed = book_start.elapsed();
@@ -820,10 +803,13 @@ fn cmd_resync(
 ) -> Result<()> {
     let region_name = region_override.unwrap_or(config.region_name());
     let region = config::get_region(region_name)?;
-    let frontmatter_format = config.frontmatter_format();
-
-    let templates = config.templates.as_ref();
-    let highlight_template = templates.and_then(|t| t.highlight_template.as_deref());
+    // An existing file only takes new highlights and frontmatter, so the
+    // file and filename templates never apply.
+    let render_options = renderer::RenderOptions {
+        file_template: None,
+        filename_template: None,
+        ..renderer::RenderOptions::from_config(config)
+    };
 
     let use_arc = use_archive.map(Archive::new);
     let save_arc = save_archive.map(Archive::new);
@@ -889,15 +875,7 @@ fn cmd_resync(
     };
 
     let output_dir = existing.path.parent().unwrap();
-    let path = sync::sync_book(
-        &entry,
-        output_dir,
-        Some(&existing),
-        None,
-        highlight_template,
-        None,
-        frontmatter_format,
-    )?;
+    let path = sync::sync_book(&entry, output_dir, Some(&existing), &render_options)?;
 
     info!(
         "{} highlights -> {}",

@@ -94,17 +94,61 @@ pub struct TemplatesConfig {
     pub filename_template: Option<String>,
 }
 
+/// Markup used for a coloured span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColourStyle {
+    /// Obsidian 1.14+ native colour highlight: `==🟣text==`.
+    #[default]
+    Obsidian,
+    /// Painter/Highlightr class: `<mark class="hltr-p">text</mark>`.
+    Painter,
+}
+
+/// How each highlight is laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HighlightLayout {
+    /// Blockquote, then a `**Highlight** (colour) - location` line.
+    #[default]
+    Quote,
+    /// One line: `text — colour | location`.
+    Line,
+}
+
+/// Where highlight colours are shown, and in which markup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HighlightColours {
+    pub style: ColourStyle,
+    /// Colour the highlighted passage.
+    pub text: bool,
+    /// Colour the colour-name label.
+    pub label: bool,
+}
+
+impl Default for HighlightColours {
+    fn default() -> Self {
+        Self {
+            style: ColourStyle::Obsidian,
+            text: false,
+            label: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub output_dir: Option<String>,
     pub region: Option<String>,
     pub download_metadata: Option<bool>,
-    pub frontmatter_format: Option<String>,
     pub templates: Option<TemplatesConfig>,
     pub ignored_books: Option<Vec<String>>,
     pub email: Option<EmailConfig>,
     pub log_dir: Option<String>,
     pub keep_logs_days: Option<u32>,
+    pub highlight_layout: Option<HighlightLayout>,
+    pub highlight_colours: Option<HighlightColours>,
 }
 
 /// Resolve the data directory for config, cookies, and state files.
@@ -163,10 +207,6 @@ impl Config {
         self.download_metadata.unwrap_or(true)
     }
 
-    pub fn frontmatter_format(&self) -> &str {
-        self.frontmatter_format.as_deref().unwrap_or("flat")
-    }
-
     pub fn ignored_books(&self) -> &[String] {
         self.ignored_books.as_deref().unwrap_or(&[])
     }
@@ -183,6 +223,14 @@ impl Config {
 
     pub fn keep_logs_days(&self) -> u32 {
         self.keep_logs_days.unwrap_or(30)
+    }
+
+    pub fn highlight_layout(&self) -> HighlightLayout {
+        self.highlight_layout.unwrap_or_default()
+    }
+
+    pub fn highlight_colours(&self) -> HighlightColours {
+        self.highlight_colours.unwrap_or_default()
     }
 }
 
@@ -267,5 +315,51 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.ignored_books(), &["Sample", "Preview"]);
+    }
+
+    #[test]
+    fn highlight_colours_default_to_obsidian_label_only() {
+        assert_eq!(
+            Config::default().highlight_colours(),
+            HighlightColours {
+                style: ColourStyle::Obsidian,
+                text: false,
+                label: true,
+            }
+        );
+    }
+
+    #[test]
+    fn reads_highlight_colours_table() -> Result<()> {
+        let config: Config =
+            toml::from_str("[highlight_colours]\nstyle = \"painter\"\ntext = false\n")?;
+        assert_eq!(
+            config.highlight_colours(),
+            HighlightColours {
+                style: ColourStyle::Painter,
+                text: false,
+                label: true,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unknown_colour_style() {
+        let parsed: std::result::Result<Config, _> =
+            toml::from_str("[highlight_colours]\nstyle = \"neon\"\n");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn highlight_layout_defaults_to_quote() {
+        assert_eq!(Config::default().highlight_layout(), HighlightLayout::Quote);
+    }
+
+    #[test]
+    fn reads_line_layout() -> Result<()> {
+        let config: Config = toml::from_str("highlight_layout = \"line\"\n")?;
+        assert_eq!(config.highlight_layout(), HighlightLayout::Line);
+        Ok(())
     }
 }

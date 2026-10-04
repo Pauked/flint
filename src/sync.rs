@@ -8,7 +8,7 @@ use chrono::NaiveDate;
 use log::debug;
 use regex::Regex;
 
-use crate::models::{Book, BookHighlights, Highlight, KindleFrontmatter, LegacyKindleFrontmatter};
+use crate::models::{Book, BookHighlights, Highlight, KindleFrontmatter};
 use crate::renderer;
 
 /// An existing file in the output directory that has kindle frontmatter.
@@ -20,7 +20,9 @@ pub struct ExistingFile {
 
 /// A highlight that already exists in a local file.
 struct RenderedHighlight {
-    line: usize,
+    /// First line (1-indexed) of the highlight's block: new highlights go
+    /// in front of it.
+    block_start: usize,
     highlight_id: String,
 }
 
@@ -132,8 +134,6 @@ pub fn load_existing_file(path: &Path) -> Result<ExistingFile> {
 }
 
 /// Parse kindle frontmatter properties from a markdown file's content.
-/// Supports both the new flat format (`kindle-bookId:`) and the legacy
-/// nested format (`kindle-sync: { bookId: ... }`).
 fn parse_frontmatter(content: &str) -> Option<KindleFrontmatter> {
     // Find YAML frontmatter between --- markers
     if !content.starts_with("---") {
@@ -144,14 +144,7 @@ fn parse_frontmatter(content: &str) -> Option<KindleFrontmatter> {
     let end = rest.find("---")?;
     let yaml_str = &rest[..end];
 
-    // Try flat format first, then legacy nested format
-    serde_yaml::from_str::<KindleFrontmatter>(yaml_str)
-        .ok()
-        .or_else(|| {
-            serde_yaml::from_str::<LegacyKindleFrontmatter>(yaml_str)
-                .ok()
-                .map(KindleFrontmatter::from)
-        })
+    serde_yaml::from_str::<KindleFrontmatter>(yaml_str).ok()
 }
 
 /// Determine which books need syncing.
@@ -215,18 +208,14 @@ pub fn sync_book(
     entry: &BookHighlights,
     output_dir: &Path,
     existing: Option<&ExistingFile>,
-    file_template: Option<&str>,
-    highlight_template: Option<&str>,
-    filename_template: Option<&str>,
-    frontmatter_format: &str,
+    options: &renderer::RenderOptions,
 ) -> Result<PathBuf> {
     fs::create_dir_all(output_dir).context("Failed to create output directory")?;
 
     match existing {
         Some(existing_file) => {
             // Incremental update: diff and insert new highlights
-            let updated =
-                diff_and_merge(entry, existing_file, highlight_template, frontmatter_format)?;
+            let updated = diff_and_merge(entry, existing_file, options)?;
             fs::write(&existing_file.path, &updated)
                 .with_context(|| format!("Failed to write {}", existing_file.path.display()))?;
             Ok(existing_file.path.clone())
@@ -236,7 +225,7 @@ pub fn sync_book(
             let filename = crate::scraper::book_filename(
                 &entry.book,
                 entry.metadata.as_ref(),
-                filename_template,
+                options.filename_template,
             );
             let path = output_dir.join(&filename);
 
@@ -249,12 +238,7 @@ pub fn sync_book(
                 path
             };
 
-            let content = renderer::render_book_file(
-                entry,
-                file_template,
-                highlight_template,
-                frontmatter_format,
-            )?;
+            let content = renderer::render_book_file(entry, options)?;
             fs::write(&path, &content)
                 .with_context(|| format!("Failed to write {}", path.display()))?;
             Ok(path)
@@ -266,10 +250,9 @@ pub fn sync_book(
 fn diff_and_merge(
     entry: &BookHighlights,
     existing: &ExistingFile,
-    highlight_template: Option<&str>,
-    frontmatter_format: &str,
+    options: &renderer::RenderOptions,
 ) -> Result<String> {
-    let local_highlights = parse_rendered_highlights(&existing.content);
+    let local_highlights = parse_rendered_highlights(&existing.content)?;
     let diffs = diff_highlights(&entry.highlights, &local_highlights);
 
     if diffs.is_empty() {
@@ -278,7 +261,6 @@ fn diff_and_merge(
             &existing.content,
             &entry.book,
             entry.highlights.len(),
-            frontmatter_format,
         ));
     }
 
@@ -289,8 +271,7 @@ fn diff_and_merge(
     let mut appends: Vec<String> = Vec::new();
 
     for diff in &diffs {
-        let rendered =
-            renderer::render_single_highlight(&diff.highlight, &entry.book, highlight_template)?;
+        let rendered = renderer::render_single_highlight(&diff.highlight, &entry.book, options)?;
 
         match diff.insert_before_line {
             Some(line) => insertions.push((line, rendered)),
@@ -324,31 +305,38 @@ fn diff_and_merge(
     let mut result = lines.join("\n");
 
     // Update frontmatter
-    result = update_frontmatter(
-        &result,
-        &entry.book,
-        entry.highlights.len(),
-        frontmatter_format,
-    );
+    result = update_frontmatter(&result, &entry.book, entry.highlights.len());
 
     Ok(result)
 }
 
 /// Parse existing ^ref-{id} block references from file content.
-fn parse_rendered_highlights(content: &str) -> Vec<RenderedHighlight> {
-    let re = Regex::new(r"\^ref-(\S+)\s*$").unwrap();
-    let mut highlights = Vec::new();
+fn parse_rendered_highlights(content: &str) -> Result<Vec<RenderedHighlight>> {
+    let re = Regex::new(r"\^ref-(\S+)\s*$").context("Invalid block reference pattern")?;
+    let lines: Vec<&str> = content.lines().collect();
 
-    for (i, line) in content.lines().enumerate() {
-        if let Some(caps) = re.captures(line) {
-            highlights.push(RenderedHighlight {
-                line: i + 1, // 1-indexed
+    Ok(lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let caps = re.captures(line)?;
+            Some(RenderedHighlight {
+                block_start: block_start(&lines, i, &re) + 1, // 1-indexed
                 highlight_id: caps[1].to_string(),
-            });
-        }
-    }
+            })
+        })
+        .collect())
+}
 
-    highlights
+/// Index of the first line of the highlight block whose block reference is on
+/// `ref_index`: the line after the previous `---`, heading or block reference.
+/// One-line highlights start on the reference line itself; quote layouts
+/// start at the `>` line above it.
+fn block_start(lines: &[&str], ref_index: usize, block_ref: &Regex) -> usize {
+    lines[..ref_index]
+        .iter()
+        .rposition(|line| line.trim() == "---" || line.starts_with('#') || block_ref.is_match(line))
+        .map_or(0, |boundary| boundary + 1)
 }
 
 /// Find new highlights not present locally and determine insertion points.
@@ -387,7 +375,7 @@ fn diff_highlights(remote: &[Highlight], local: &[RenderedHighlight]) -> Vec<Dif
                 local
                     .iter()
                     .find(|lh| lh.highlight_id == *next_id)
-                    .map(|lh| lh.line)
+                    .map(|lh| lh.block_start)
             });
 
             DiffResult {
@@ -399,13 +387,8 @@ fn diff_highlights(remote: &[Highlight], local: &[RenderedHighlight]) -> Vec<Dif
 }
 
 /// Update the frontmatter in a file's content.
-fn update_frontmatter(
-    content: &str,
-    book: &Book,
-    highlights_count: usize,
-    frontmatter_format: &str,
-) -> String {
-    let new_fm = renderer::render_frontmatter(book, highlights_count, frontmatter_format);
+fn update_frontmatter(content: &str, book: &Book, highlights_count: usize) -> String {
+    let new_fm = renderer::render_frontmatter(book, highlights_count);
 
     if let Some(rest) = content.strip_prefix("---")
         && let Some(end) = rest.find("---")
@@ -424,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_parse_frontmatter() {
-        let content = "---\nkindle-bookId: '12345'\nkindle-title: 'Test'\nkindle-author: Test Author\nkindle-highlightsCount: 5\n---\n# Test\n";
+        let content = "---\nkindle-book-id: '12345'\nkindle-title: 'Test'\nkindle-author: Test Author\nkindle-highlights-count: 5\n---\n# Test\n";
         let fm = parse_frontmatter(content).unwrap();
         assert_eq!(fm.book_id, "12345");
         assert_eq!(fm.title, "Test");
@@ -432,44 +415,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_frontmatter_legacy() {
-        let content = "---\nkindle-sync:\n  bookId: '213456241'\n  title: 'Atomic Habits'\n  author: James Clear\n  asin: B01N5AX61W\n  bookImageUrl: 'https://example.com/cover.jpg'\n  highlightsCount: 97\n---\n# Atomic Habits\n";
-        let fm = parse_frontmatter(content).unwrap();
-        assert_eq!(fm.book_id, "213456241");
-        assert_eq!(fm.title, "Atomic Habits");
-        assert_eq!(fm.author, "James Clear");
-        assert_eq!(fm.asin.as_deref(), Some("B01N5AX61W"));
-        assert_eq!(fm.highlights_count, 97);
+    fn camel_case_keys_are_not_recognised() {
+        let content = "---\nkindle-bookId: '12345'\nkindle-title: 'Test'\nkindle-author: A\nkindle-highlightsCount: 5\n---\n";
+        assert!(parse_frontmatter(content).is_none());
     }
 
     #[test]
-    fn test_parse_frontmatter_legacy_real_file() {
-        // Exact content from a real nested-format file produced by the original renderer
-        let content = "\
----
-kindle-sync:
-  bookId: '866356410'
-  title: 'C# 12 in a Nutshell: The Definitive Reference'
-  author: Joseph Albahari
-  asin: B0CN83NT9L
-  bookImageUrl: 'https://m.media-amazon.com/images/I/71uN6eGMuFL._SY160.jpg'
-  highlightsCount: 15
----
-
-# C# 12 in a Nutshell
-## Metadata
-";
-        let fm = parse_frontmatter(content);
-        assert!(
-            fm.is_some(),
-            "parse_frontmatter returned None for nested format"
-        );
-        let fm = fm.unwrap();
-        assert_eq!(fm.book_id, "866356410");
-        assert_eq!(fm.title, "C# 12 in a Nutshell: The Definitive Reference");
-        assert_eq!(fm.author, "Joseph Albahari");
-        assert_eq!(fm.asin.as_deref(), Some("B0CN83NT9L"));
-        assert_eq!(fm.highlights_count, 15);
+    fn nested_kindle_sync_format_is_not_recognised() {
+        let content = "---\nkindle-sync:\n  bookId: '12345'\n  title: 'Test'\n  author: A\n  highlightsCount: 5\n---\n";
+        assert!(parse_frontmatter(content).is_none());
     }
 
     #[test]
@@ -483,7 +437,7 @@ kindle-sync:
             image_url: Some("https://example.com/cover.jpg".to_string()),
             last_annotated_date: Some(NaiveDate::from_ymd_opt(2024, 8, 27).unwrap()),
         };
-        let fm_str = renderer::render_frontmatter(&book, 15, "flat");
+        let fm_str = renderer::render_frontmatter(&book, 15);
         let content = format!("{fm_str}\n# Test\n");
         let fm = parse_frontmatter(&content).unwrap();
         assert_eq!(fm.book_id, "866356410");
@@ -492,33 +446,87 @@ kindle-sync:
     }
 
     #[test]
-    fn test_parse_frontmatter_roundtrip_nested() {
-        let book = Book {
-            id: "866356410".to_string(),
-            title: "C# 12 in a Nutshell: The Definitive Reference".to_string(),
-            author: "Joseph Albahari".to_string(),
-            asin: Some("B0CN83NT9L".to_string()),
-            url: None,
-            image_url: Some("https://example.com/cover.jpg".to_string()),
-            last_annotated_date: Some(NaiveDate::from_ymd_opt(2024, 8, 27).unwrap()),
-        };
-        let fm_str = renderer::render_frontmatter(&book, 15, "nested");
-        let content = format!("{fm_str}\n# Test\n");
-        let fm = parse_frontmatter(&content).unwrap();
-        assert_eq!(fm.book_id, "866356410");
-        assert_eq!(fm.asin.as_deref(), Some("B0CN83NT9L"));
-        assert_eq!(fm.highlights_count, 15);
-    }
-
-    #[test]
-    fn test_parse_rendered_highlights() {
-        let content = "some text ^ref-12345\nother line\nanother highlight ^ref-67890\n";
-        let highlights = parse_rendered_highlights(content);
+    fn test_parse_rendered_highlights() -> Result<()> {
+        let content =
+            "## Highlights\nsome text ^ref-12345\n\n---\nanother highlight ^ref-67890\n\n---\n";
+        let highlights = parse_rendered_highlights(content)?;
         assert_eq!(highlights.len(), 2);
         assert_eq!(highlights[0].highlight_id, "12345");
-        assert_eq!(highlights[0].line, 1);
+        assert_eq!(highlights[0].block_start, 2);
         assert_eq!(highlights[1].highlight_id, "67890");
-        assert_eq!(highlights[1].line, 3);
+        assert_eq!(highlights[1].block_start, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn block_start_is_the_quote_when_ref_sits_on_metadata_line() -> Result<()> {
+        let content = "## Highlights\n> first\n\n**Highlight** - location: [1](x) ^ref-1\n\nA note.\n\n---\n> second\n\n**Highlight** - location: [2](x) ^ref-2\n\n---\n";
+        let highlights = parse_rendered_highlights(content)?;
+        let starts: Vec<usize> = highlights.iter().map(|h| h.block_start).collect();
+        assert_eq!(starts, vec![2, 9]);
+        Ok(())
+    }
+
+    #[test]
+    fn new_highlight_is_inserted_before_whole_quote_block() -> Result<()> {
+        let book = Book {
+            id: "b1".to_string(),
+            title: "Book".to_string(),
+            author: "Author".to_string(),
+            asin: Some("B01TEST".to_string()),
+            url: None,
+            image_url: None,
+            last_annotated_date: None,
+        };
+        let highlight = |id: &str, text: &str| Highlight {
+            id: id.to_string(),
+            text: Some(text.to_string()),
+            location: Some(id.to_string()),
+            page: None,
+            note: None,
+            color: Some("yellow".to_string()),
+        };
+        let options = renderer::RenderOptions::default();
+        let first = highlight("1", "First");
+        let second = highlight("2", "Second");
+        let third = highlight("3", "Third");
+        let content = format!(
+            "---\nkindle-book-id: 'b1'\n---\n## Highlights\n{}{}",
+            renderer::render_single_highlight(&first, &book, &options)?,
+            renderer::render_single_highlight(&third, &book, &options)?
+        );
+        let existing = ExistingFile {
+            path: PathBuf::from("Book.md"),
+            frontmatter: KindleFrontmatter {
+                book_id: "b1".to_string(),
+                title: "Book".to_string(),
+                author: "Author".to_string(),
+                asin: Some("B01TEST".to_string()),
+                last_annotated_date: None,
+                book_image_url: None,
+                highlights_count: 2,
+                last_sync_date: None,
+            },
+            content,
+        };
+        let entry = BookHighlights {
+            book: book.clone(),
+            highlights: vec![first, second, third],
+            metadata: None,
+        };
+
+        let merged = diff_and_merge(&entry, &existing, &options)?;
+
+        let first_at = merged.find("> First").unwrap_or(usize::MAX);
+        let second_at = merged.find("> Second").unwrap_or(usize::MAX);
+        let third_at = merged.find("> Third").unwrap_or(usize::MAX);
+        assert!(first_at < second_at && second_at < third_at, "{merged}");
+        assert!(merged.contains("---\n> Second\n"), "{merged}");
+        assert!(
+            merged.contains("> Third\n\n**Highlight** (==yellow==) - location: [3]"),
+            "{merged}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -579,11 +587,11 @@ kindle-sync:
         ];
         let local = vec![
             RenderedHighlight {
-                line: 5,
+                block_start: 5,
                 highlight_id: "1".to_string(),
             },
             RenderedHighlight {
-                line: 10,
+                block_start: 10,
                 highlight_id: "3".to_string(),
             },
         ];
@@ -596,7 +604,7 @@ kindle-sync:
 
     #[test]
     fn test_update_frontmatter() {
-        let content = "---\nkindle-bookId: '12345'\nkindle-title: 'Test'\nkindle-author: Author\nkindle-highlightsCount: 5\n---\n# Test\nContent here\n";
+        let content = "---\nkindle-book-id: '12345'\nkindle-title: 'Test'\nkindle-author: Author\nkindle-highlights-count: 5\n---\n# Test\nContent here\n";
         let book = Book {
             id: "12345".to_string(),
             title: "Test".to_string(),
@@ -606,54 +614,14 @@ kindle-sync:
             image_url: None,
             last_annotated_date: None,
         };
-        let result = update_frontmatter(content, &book, 10, "flat");
-        assert!(result.contains("kindle-highlightsCount: 10"));
+        let result = update_frontmatter(content, &book, 10);
+        assert!(result.contains("kindle-highlights-count: 10"));
         assert!(result.contains("---\n# Test"));
         assert!(
             !result.contains("---\n\n"),
             "should not have blank line after frontmatter"
         );
         assert!(result.contains("Content here"));
-    }
-
-    #[test]
-    fn test_update_frontmatter_nested() {
-        let content = "---\nkindle-sync:\n  bookId: '12345'\n  title: 'Test'\n  author: Author\n  highlightsCount: 5\n---\n# Test\nContent here\n";
-        let book = Book {
-            id: "12345".to_string(),
-            title: "Test".to_string(),
-            author: "Author".to_string(),
-            asin: None,
-            url: None,
-            image_url: None,
-            last_annotated_date: None,
-        };
-        let result = update_frontmatter(content, &book, 10, "nested");
-        assert!(result.contains("kindle-sync:\n"));
-        assert!(result.contains("  highlightsCount: 10"));
-        assert!(result.contains("---\n# Test"));
-        assert!(
-            !result.contains("---\n\n"),
-            "should not have blank line after frontmatter"
-        );
-        assert!(result.contains("Content here"));
-    }
-
-    fn make_existing_files(entries: Vec<(String, ExistingFile)>) -> ExistingFiles {
-        let mut by_book_id = HashMap::new();
-        let mut by_asin: HashMap<String, String> = HashMap::new();
-        for (book_id, file) in entries {
-            if let Some(ref asin) = file.frontmatter.asin {
-                by_asin
-                    .entry(asin.clone())
-                    .or_insert_with(|| book_id.clone());
-            }
-            by_book_id.insert(book_id, file);
-        }
-        ExistingFiles {
-            by_book_id,
-            by_asin,
-        }
     }
 
     #[test]
@@ -748,5 +716,22 @@ kindle-sync:
         let later_sync = NaiveDate::from_ymd_opt(2024, 9, 15).unwrap();
         let to_sync = books_to_sync(&remote, &existing, Some(later_sync));
         assert_eq!(to_sync.len(), 0);
+    }
+
+    fn make_existing_files(entries: Vec<(String, ExistingFile)>) -> ExistingFiles {
+        let mut by_book_id = HashMap::new();
+        let mut by_asin: HashMap<String, String> = HashMap::new();
+        for (book_id, file) in entries {
+            if let Some(ref asin) = file.frontmatter.asin {
+                by_asin
+                    .entry(asin.clone())
+                    .or_insert_with(|| book_id.clone());
+            }
+            by_book_id.insert(book_id, file);
+        }
+        ExistingFiles {
+            by_book_id,
+            by_asin,
+        }
     }
 }

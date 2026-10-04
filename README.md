@@ -84,13 +84,20 @@ Reads the ASIN from the file's frontmatter, re-scrapes highlights from Amazon, a
 
 ### Incremental sync
 
-Re-running `sync` on existing files is safe. New highlights are inserted in the correct position. Existing highlights (and any edits you've made to them) are preserved. The `^ref-{id}` block references on each highlight line enable this diffing. Books are matched by `bookId` with fallback to ASIN for resilience against Amazon title changes.
+Re-running `sync` on existing files is safe. New highlights are inserted in the correct position. Existing highlights (and any edits you've made to them) are preserved. The `^ref-{id}` block references on each highlight line enable this diffing. Books are matched by `kindle-book-id` with fallback to ASIN for resilience against Amazon title changes.
 
 ### Email notifications
 
 Opt-in email reports via [Resend](https://resend.com). Add an `[email]` section to `config.toml`:
 
 ```toml
+highlight_layout = "quote"   # "quote" (default) or "line"
+
+[highlight_colours]
+style = "obsidian"   # "obsidian" (==🟣text==) or "painter" (<mark class="hltr-p">text</mark>)
+text = false         # colour the highlighted passage
+label = true         # colour the colour-name label
+
 [email]
 to = "you@example.com"
 from = "flint@yourdomain.com"
@@ -132,7 +139,6 @@ Optional. Create `config.toml` in the data directory:
 output_dir = "~/Obsidian/Books"
 region = "global"
 download_metadata = true
-frontmatter_format = "flat"  # or "nested" for legacy kindle-sync: format
 ignored_books = ["Sample Book", "Free Preview"]
 # log_dir = "~/flint-logs"    # default: {data_dir}/logs/
 # keep_logs_days = 30
@@ -158,24 +164,31 @@ resend_api_key = "re_xxx..."
 - `{{secondAuthorFirstName}}`, `{{secondAuthorLastName}}` — second author's parsed names
 - `{{publicationDate}}` — raw publication date string from Amazon metadata
 
+### Highlight template variables
+
+- `{{text}}`, `{{note}}`, `{{location}}`, `{{page}}`, `{{app_link}}`, `{{id}}` — the highlight's raw fields
+- `{{color}}`, `{{color_code}}` — Kindle colour name and its `hltr-*` suffix (`y`, `g`, `p`, `b`, `r`, `o`)
+- `{{coloured_text}}`, `{{colour_label}}` — text and colour name with `[highlight_colours]` markup applied
+- `{{block_ref}}` — the `^ref-…` block ID; place it to choose its line, otherwise Flint appends it to the line holding the highlight text
+
 ### Template filters
 
 - `{{ publication_date | dateformat(format="%B %Y") }}` — format date strings; parses `January 1, 2020`, `2024-03-15`, and `2024` formats. Falls back to the original string if parsing fails.
 
 ## Output format
 
-Files are written with Obsidian-compatible YAML frontmatter (`kindle-*` properties) and block references. Highlight colors are rendered as `<mark class="hltr-*">` — see [Highlight colors](#highlight-colors) for the CSS that makes them show up. Filenames are sanitized to avoid characters that break Obsidian links (`# ^ [ ] |`). Both the flat format and legacy nested `kindle-sync:` format are supported for reading existing files.
+Files are written with Obsidian-compatible YAML frontmatter (`kindle-*` properties) and block references. Highlight colours are rendered as Obsidian colour highlights by default — see [Highlight colors](#highlight-colors). Filenames are sanitized to avoid characters that break Obsidian links (`# ^ [ ] |`). Property names are kebab-case; notes written before 0.3.0 (camelCase keys or the nested `kindle-sync:` block) are not recognised, so move them aside and sync to regenerate.
 
 ```markdown
 ---
-kindle-bookId: '49849'
+kindle-book-id: '49849'
 kindle-title: 'Atomic Habits'
 kindle-author: James Clear
 kindle-asin: B01N5AX61W
-kindle-lastAnnotatedDate: '2024-08-27'
-kindle-bookImageUrl: 'https://...'
-kindle-highlightsCount: 97
-flint-lastSyncDate: '2024-08-27T19:50'
+kindle-last-annotated-date: '2024-08-27'
+kindle-book-image-url: 'https://...'
+kindle-highlights-count: 97
+flint-last-sync-date: '2024-08-27T19:50'
 flint-version: 0.2.5
 ---
 # Atomic Habits
@@ -186,17 +199,53 @@ flint-version: 0.2.5
 * [Kindle link](kindle://book?action=open&asin=B01N5AX61W)
 
 ## Highlights
-Habits are the compound interest of self-improvement. — <mark class="hltr-y">yellow</mark> | location: [259](kindle://book?action=open&asin=B01N5AX61W&location=259) ^ref-5675
+> Habits are the compound interest of self-improvement.
+
+**Highlight** (==yellow==) - location: [259](kindle://book?action=open&asin=B01N5AX61W&location=259) ^ref-5675
 
 ---
 ```
 
+### Highlight layout
+
+`highlight_layout = "quote"` (default) writes each highlight as a blockquote with a metadata line:
+
+```markdown
+> People like this tend to thrive.
+
+**Highlight** (==🟣pink==) - location: [126](kindle://…) ^ref-54321
+```
+
+`highlight_layout = "line"` keeps everything on one line, as Flint did up to 0.2.6:
+
+```markdown
+People like this tend to thrive. — ==🟣pink== | location: [126](kindle://…) ^ref-54321
+```
+
+The `^ref-` block ID sits on the metadata line in the quote layout, so it reads as metadata
+rather than part of the quote; an Obsidian link or embed to it shows that line. A custom
+`highlight_template` replaces either layout.
+
 ### Highlight colors
 
-Flint tags each highlight with its Kindle color as `<mark class="hltr-y">yellow</mark>`
-(`y` yellow, `g` green, `p` pink, `b` blue, `r` red, `o` orange). Obsidian needs CSS
-for those classes, otherwise the color name renders as plain text.
+`[highlight_colours]` sets where the Kindle colour shows (`text`, `label`, both or neither)
+and in which markup. By default only the label is coloured, so the passage stays easy to read.
 
+| `style` | Markup | Needs |
+|---|---|---|
+| `obsidian` (default) | `==🟣text==` | Obsidian 1.14+, nothing else |
+| `painter` | `<mark class="hltr-p">text</mark>` | the CSS snippet below |
+
+Obsidian colour mapping: orange 🟠, green 🟢, blue and aqua 🔵, pink 🟣, red 🔴; yellow gets
+no emoji, since a plain `==text==` is Obsidian's default yellow. Text that already contains
+`==` is left unwrapped. The Painter plugin can interfere with Obsidian's native highlight
+swatch, so turn it off when using `obsidian`. For Flint's previous look, use
+`highlight_layout = "line"` with `style = "painter"` and `text = false`.
+
+Changing these settings only affects highlights rendered from then on: a sync keeps the
+existing lines in a note. Move a note aside and sync again to re-render it in full.
+
+For `painter`, classes are `y` yellow, `g` green, `p` pink, `b` blue, `r` red, `o` orange.
 These class names originally came from the Highlightr plugin, which has since been
 removed from the community plugin store — existing installs keep working, but it can
 no longer be installed or re-enabled. Flint therefore ships its own CSS snippet:

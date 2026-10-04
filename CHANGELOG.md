@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-10-04
+
+**Breaking:** frontmatter keys are now kebab-case and the nested format is gone. Existing notes are not recognised: move them aside and run `sync --all` to regenerate.
+
+### Added
+- `[highlight_colours]` config table: `style` (`obsidian` or `painter`), `text` and `label` switches
+  - `obsidian` writes Obsidian 1.14+ native colour highlights (`==🟣text==`); `painter` writes `<mark class="hltr-*">`
+  - Orange 🟠, green 🟢, blue and aqua 🔵, pink 🟣, red 🔴; yellow and unknown colours get a plain `==text==`
+  - Text already containing `==` is left unwrapped in `obsidian` style
+- `highlight_layout` config option: `quote` (blockquote, then `**Highlight** (colour) - location`) or `line` (the previous one-line layout)
+- `{{block_ref}}` highlight template variable: a template that places it decides which line carries the `^ref-` ID; the quote layout puts it on the metadata line
+- `{{coloured_text}}` and `{{colour_label}}` highlight template variables; `{{text}}`, `{{color}}` and `{{color_code}}` are unchanged
+
+### Changed
+- Default layout is now `quote`, with the label coloured in `obsidian` style and the passage left plain; the previous look is `highlight_layout = "line"` with `style = "painter"`, `text = false`
+- Existing highlight lines are not re-rendered on sync; move a note aside and sync to regenerate it
+- New highlights are inserted before the whole block of the next existing highlight (the line after the previous `---` or heading), not before its `^ref-` line, so they never split a quote from its metadata
+- Template, layout and colour settings travel together as `RenderOptions`; `sync_book` drops from 7 arguments to 4
+- Frontmatter keys renamed to kebab-case: `kindle-book-id`, `kindle-last-annotated-date`, `kindle-book-image-url`, `kindle-highlights-count`, `flint-last-sync-date`; the camelCase names are no longer read
+- `parse_rendered_highlights` returns an error instead of panicking on a bad pattern
+
+### Removed
+- GitHub Actions release workflow and the stale v0.1.0 release; build from source
+- Nested `kindle-sync:` frontmatter (from the original Obsidian Kindle plugin): no longer written or read
+- `frontmatter_format` config option (only meaningful for the nested format)
+
 ## [0.2.6] - 2026-07-20
 
 ### Added

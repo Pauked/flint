@@ -1,0 +1,8 @@
+{% if text %}> {{coloured_text}}
+
+**Highlight**{% if color %} ({{colour_label}}){% endif %} - location: [{{location}}]({{app_link}}) {{block_ref}}
+{% else %}**Note** - location: [{{location}}]({{app_link}}) {{block_ref}}
+{% endif %}{% if note %}
+{{note}}
+{% endif %}
+---

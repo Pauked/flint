@@ -41,7 +41,7 @@ pub struct BookMetadata {
 /// Flat Obsidian properties for kindle metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KindleFrontmatter {
-    #[serde(rename = "kindle-bookId")]
+    #[serde(rename = "kindle-book-id")]
     pub book_id: String,
     #[serde(rename = "kindle-title")]
     pub title: String,
@@ -49,53 +49,12 @@ pub struct KindleFrontmatter {
     pub author: String,
     #[serde(rename = "kindle-asin", default)]
     pub asin: Option<String>,
-    #[serde(rename = "kindle-lastAnnotatedDate", default)]
+    #[serde(rename = "kindle-last-annotated-date", default)]
     pub last_annotated_date: Option<String>,
-    #[serde(rename = "kindle-bookImageUrl", default)]
+    #[serde(rename = "kindle-book-image-url", default)]
     pub book_image_url: Option<String>,
-    #[serde(rename = "kindle-highlightsCount")]
+    #[serde(rename = "kindle-highlights-count")]
     pub highlights_count: usize,
-    #[serde(rename = "flint-lastSyncDate", default)]
+    #[serde(rename = "flint-last-sync-date", default)]
     pub last_sync_date: Option<String>,
-}
-
-/// Legacy nested format from the Obsidian Kindle plugin (`kindle-sync:` wrapper).
-#[derive(Debug, Clone, Deserialize)]
-pub struct LegacyKindleFrontmatter {
-    #[serde(rename = "kindle-sync")]
-    pub kindle_sync: LegacyKindleSync,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LegacyKindleSync {
-    #[serde(rename = "bookId")]
-    pub book_id: String,
-    pub title: String,
-    pub author: String,
-    #[serde(default)]
-    pub asin: Option<String>,
-    #[serde(rename = "lastAnnotatedDate", default)]
-    pub last_annotated_date: Option<String>,
-    #[serde(rename = "bookImageUrl", default)]
-    pub book_image_url: Option<String>,
-    #[serde(rename = "highlightsCount", default)]
-    pub highlights_count: usize,
-    #[serde(rename = "lastSyncDate", default)]
-    pub last_sync_date: Option<String>,
-}
-
-impl From<LegacyKindleFrontmatter> for KindleFrontmatter {
-    fn from(legacy: LegacyKindleFrontmatter) -> Self {
-        let s = legacy.kindle_sync;
-        Self {
-            book_id: s.book_id,
-            title: s.title,
-            author: s.author,
-            asin: s.asin,
-            last_annotated_date: s.last_annotated_date,
-            book_image_url: s.book_image_url,
-            highlights_count: s.highlights_count,
-            last_sync_date: s.last_sync_date,
-        }
-    }
 }
